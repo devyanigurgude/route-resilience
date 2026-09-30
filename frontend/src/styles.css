@@ -1,0 +1,296 @@
+@import "tailwindcss";
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Design system definition.
+ *
+ * The @theme inline block maps CSS custom properties to Tailwind utility
+ * classes (e.g. --color-primary -> bg-primary, text-primary).
+ *
+ * The :root and .dark blocks define the actual color values using oklch.
+ * All colors MUST use oklch format.
+ *
+ * To add a new semantic color:
+ * 1. Add the variable to :root (light value) and .dark (dark value)
+ * 2. Register it in @theme inline as --color-<name>: var(--<name>)
+ */
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --radius-4xl: calc(var(--radius) + 16px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-ring-offset-background: var(--background);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --font-display: var(--font-display);
+  --font-sans: var(--font-sans);
+}
+
+:root {
+  --radius: 0.25rem;
+  --font-display: "Space Grotesk", "Helvetica Neue", sans-serif;
+  --font-sans: "Manrope", "Helvetica Neue", sans-serif;
+  --background: oklch(0.12 0.025 255);
+  --foreground: oklch(0.94 0.012 245);
+  --card: oklch(0.16 0.025 252);
+  --card-foreground: oklch(0.94 0.012 245);
+  --popover: oklch(0.16 0.025 252);
+  --popover-foreground: oklch(0.94 0.012 245);
+  --primary: oklch(0.72 0.16 245);
+  --primary-foreground: oklch(0.98 0.01 245);
+  --secondary: oklch(0.2 0.03 250);
+  --secondary-foreground: oklch(0.86 0.015 245);
+  --muted: oklch(0.2 0.025 250);
+  --muted-foreground: oklch(0.62 0.025 245);
+  --accent: oklch(0.25 0.06 245);
+  --accent-foreground: oklch(0.94 0.012 245);
+  --destructive: oklch(0.64 0.19 25);
+  --destructive-foreground: oklch(0.98 0.01 25);
+  --border: oklch(0.7 0.03 245 / 18%);
+  --input: oklch(0.7 0.03 245 / 25%);
+  --ring: oklch(0.72 0.16 245);
+  --chart-1: oklch(0.72 0.16 245);
+  --chart-2: oklch(0.72 0.16 150);
+  --chart-3: oklch(0.72 0.16 75);
+  --chart-4: oklch(0.64 0.19 25);
+  --chart-5: oklch(0.45 0.04 245);
+  --sidebar: oklch(0.1 0.025 255);
+  --sidebar-foreground: oklch(0.9 0.015 245);
+  --sidebar-primary: oklch(0.72 0.16 245);
+  --sidebar-primary-foreground: oklch(0.98 0.01 245);
+  --sidebar-accent: oklch(0.18 0.04 250);
+  --sidebar-accent-foreground: oklch(0.94 0.012 245);
+  --sidebar-border: oklch(0.7 0.03 245 / 18%);
+  --sidebar-ring: oklch(0.72 0.16 245);
+  --hero-shadow: oklch(0.12 0.016 65 / 78%);
+  --hero-vignette: oklch(0.12 0.016 65 / 45%);
+}
+
+.dark {
+  --background: oklch(0.12 0.025 255);
+  --foreground: oklch(0.94 0.012 245);
+  --card: oklch(0.16 0.025 252);
+  --card-foreground: oklch(0.94 0.012 245);
+  --popover: oklch(0.16 0.025 252);
+  --popover-foreground: oklch(0.94 0.012 245);
+  --primary: oklch(0.72 0.16 245);
+  --primary-foreground: oklch(0.98 0.01 245);
+  --secondary: oklch(0.2 0.03 250);
+  --secondary-foreground: oklch(0.86 0.015 245);
+  --muted: oklch(0.2 0.025 250);
+  --muted-foreground: oklch(0.62 0.025 245);
+  --accent: oklch(0.25 0.06 245);
+  --accent-foreground: oklch(0.94 0.012 245);
+  --destructive: oklch(0.64 0.19 25);
+  --destructive-foreground: oklch(0.98 0.01 25);
+  --border: oklch(0.7 0.03 245 / 18%);
+  --input: oklch(0.7 0.03 245 / 25%);
+  --ring: oklch(0.72 0.16 245);
+  --chart-1: oklch(0.72 0.16 245);
+  --chart-2: oklch(0.72 0.16 150);
+  --chart-3: oklch(0.72 0.16 75);
+  --chart-4: oklch(0.64 0.19 25);
+  --chart-5: oklch(0.45 0.04 245);
+  --sidebar: oklch(0.1 0.025 255);
+  --sidebar-foreground: oklch(0.9 0.015 245);
+  --sidebar-primary: oklch(0.72 0.16 245);
+  --sidebar-primary-foreground: oklch(0.98 0.01 245);
+  --sidebar-accent: oklch(0.18 0.04 250);
+  --sidebar-accent-foreground: oklch(0.94 0.012 245);
+  --sidebar-border: oklch(0.7 0.03 245 / 18%);
+  --sidebar-ring: oklch(0.72 0.16 245);
+  --hero-shadow: oklch(0.12 0.016 65 / 78%);
+  --hero-vignette: oklch(0.12 0.016 65 / 45%);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+  }
+}
+
+@media (min-width: 768px) {
+  .route-resilience-nav ~ main,
+  .route-resilience-nav ~ section {
+    margin-left: 16rem;
+  }
+}
+
+@media (max-width: 767px) {
+  .route-resilience-nav {
+    position: relative;
+    inset: auto;
+    width: 100%;
+  }
+}
+
+@keyframes hero-reveal {
+  from {
+    opacity: 0;
+    transform: scale(1.04);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes route-drift {
+  from {
+    stroke-dashoffset: 0;
+  }
+
+  to {
+    stroke-dashoffset: -180;
+  }
+}
+
+@keyframes title-rise {
+  from {
+    opacity: 0;
+    transform: translateY(1rem);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes nav-drop {
+  from {
+    opacity: 0;
+    transform: translateY(-0.75rem);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.route-resilience-artwork {
+  animation: hero-reveal 1.8s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+.route-resilience-title {
+  animation: title-rise 1s 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+.route-resilience-nav {
+  animation: nav-drop 0.9s 0.25s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+.route-line {
+  animation: route-drift 26s linear infinite;
+}
+
+.hero-overlay-radial {
+  background: radial-gradient(ellipse at 15% 50%, var(--hero-shadow), transparent 56%);
+}
+
+.hero-overlay-linear {
+  background: linear-gradient(
+    90deg,
+    var(--hero-vignette),
+    transparent 48%,
+    oklch(0.12 0.016 65 / 12%)
+  );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .route-resilience-artwork,
+  .route-resilience-title,
+  .route-resilience-nav,
+  .route-line {
+    animation: none;
+  }
+}
+
+/* ── Explore page ────────────────────────────────────────────────────────── */
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.explore-shimmer {
+  background: linear-gradient(
+    90deg,
+    oklch(0.21 0.018 68 / 60%) 25%,
+    oklch(0.28 0.025 78 / 80%) 50%,
+    oklch(0.21 0.018 68 / 60%) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+
+.explore-card-glow {
+  background: radial-gradient(ellipse at 50% 0%, oklch(0.79 0.11 78 / 8%), transparent 70%);
+}
+
+.explore-bg-grid {
+  background-image:
+    linear-gradient(oklch(0.75 0.04 81 / 30%) 1px, transparent 1px),
+    linear-gradient(90deg, oklch(0.75 0.04 81 / 30%) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+
+.explore-bg-radial {
+  background: radial-gradient(ellipse at 60% 20%, oklch(0.79 0.11 78 / 5%), transparent 55%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .explore-shimmer {
+    animation: none;
+  }
+}

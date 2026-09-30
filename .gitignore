@@ -1,0 +1,99 @@
+# ==============================
+# Python
+# ==============================
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ==============================
+# Python logs / temporary output
+# ==============================
+*.log
+*_out.txt
+*_err.txt
+
+# ==============================
+# ML checkpoints / large models
+# ==============================
+*.pth
+*.pt
+*.ckpt
+*.onnx
+
+# ==============================
+# Generated experiment outputs
+# ==============================
+outputs/
+
+# ==============================
+# Frontend dependencies/build artifacts
+# ==============================
+frontend/node_modules/
+frontend/dist/
+frontend/.output/
+frontend/.tanstack/
+frontend/.wrangler/
+frontend/.vinxi/
+frontend/.nitro/
+
+# ==============================
+# Lovable / generated tooling metadata
+# ==============================
+.lovable/
+
+# ==============================
+# Environment / secrets
+# ==============================
+.env
+.env.*
+!.env.example
+*.local
+
+# ==============================
+# Frontend logs
+# ==============================
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ==============================
+# Wrangler / Cloudflare
+# ==============================
+.dev.vars
+
+# ==============================
+# Editor / OS
+# ==============================
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ==============================
+# Temporary files
+# ==============================
+*.tmp
+*.temp
+
+# ==============================
+# Local dataset files (not stored in Git)
+# ==============================
+RouteResilience/images_png/
+RouteResilience/masks_png/
+
+# Frontend generated demo visualization images
+frontend/public/scene_*.png
