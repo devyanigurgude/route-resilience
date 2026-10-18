@@ -1,0 +1,60 @@
+{
+  "threshold": 0.5,
+  "selection_split": "validation",
+  "metric": "focal_dice",
+  "config": {
+    "data": {
+      "dataset_dir": "F:\\VIT data\\Third _Year\\TY_Deep_Learning\\route_resilience\\RouteResilience",
+      "image_subdir": "images_png",
+      "mask_subdir": "masks_png",
+      "split_csv": "data_split.csv",
+      "image_size": 256,
+      "batch_size": 16,
+      "num_workers": 2,
+      "use_occlusion_augmentation": true,
+      "occlusion_max_holes": 6,
+      "occlusion_max_frac": 0.15
+    },
+    "model": {
+      "arch": "segformer",
+      "encoder_name": "mit_b0",
+      "encoder_weights": "imagenet",
+      "in_channels": 3,
+      "classes": 1,
+      "dropout_p": 0.2
+    },
+    "train": {
+      "epochs": 50,
+      "patience": 10,
+      "lr": 0.0001,
+      "weight_decay": 0.0001,
+      "loss": "focal_dice",
+      "focal_alpha": 0.75,
+      "focal_gamma": 2.0,
+      "threshold": 0.5,
+      "seed": 42
+    },
+    "uncertainty": {
+      "mc_samples": 20,
+      "ece_bins": 15
+    },
+    "graph": {
+      "max_gap_px": 15.0,
+      "min_gap_confidence": 0.15,
+      "min_edge_length_px": 3.0,
+      "tangent_dot_threshold": 0.7,
+      "continuity_penalty_weight": 0.0
+    },
+    "phase3": {
+      "weight": "length_px",
+      "od_pair_limit": 200,
+      "od_seed": 42,
+      "top_n": 10,
+      "failure_count": 1,
+      "failure_seed": 42,
+      "recovery_budget": null,
+      "recovery_ordering": "explicit_failure_order"
+    },
+    "device": "cuda"
+  }
+}

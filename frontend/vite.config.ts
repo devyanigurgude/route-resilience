@@ -7,6 +7,10 @@
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
 export default defineConfig({
+  // The app's production API is api_server.py.  Nitro is a deploy adapter,
+  // not part of that application path, and its Cloudflare build worker hangs
+  // in this local Windows environment before Vite can emit client assets.
+  nitro: false,
   tanstackStart: {
     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
     // nitro/vite builds from this

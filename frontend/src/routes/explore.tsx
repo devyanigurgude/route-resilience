@@ -1,18 +1,30 @@
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import {
-  AlertTriangle,
+  AlertCircle,
   ArrowRight,
   CheckCircle2,
+  Clock,
+  ExternalLink,
   FileImage,
-  Image as ImageIcon,
+  FolderOpen,
+  Layers,
   LoaderCircle,
+  Network,
+  Plus,
+  RefreshCw,
+  Sparkles,
   UploadCloud,
 } from "lucide-react";
 import { ChangeEvent, DragEvent, useEffect, useRef, useState } from "react";
 
-import { Navbar } from "@/components/Navbar";
+import {
+  API_BASE,
+  getAnalyses,
+  saveAnalysisToHistory,
+  SAVED_ANALYSIS_KEY,
+  type AnalysisItem,
+} from "@/lib/backend";
 
-type LayerKey = "satellite" | "roads" | "repaired" | "skeleton";
 type AnalysisPhase = "idle" | "processing" | "success" | "error";
 
 type BackendAnalysisResponse = {
@@ -28,18 +40,18 @@ type BackendAnalysisResponse = {
     [key: string]: string | undefined;
   };
   summary?: {
-    threshold?: number;
-    healed_edge_count?: number;
-    before_healing?: {
-      n_nodes?: number;
-      n_edges?: number;
-      n_components?: number;
+    image_dimensions?: { height: number; width: number };
+    mask_quality?: { road_fraction?: number; road_pixel_count?: number };
+    before_healing?: { n_nodes: number; n_edges: number; n_components: number };
+    after_healing?: { n_nodes: number; n_edges: number; n_components: number };
+    graph_quality?: {
+      component_sizes?: number[];
+      isolated_node_count?: number;
+      junction_count?: number;
+      routable_component_count?: number;
     };
-    after_healing?: {
-      n_nodes?: number;
-      n_edges?: number;
-      n_components?: number;
-    };
+    graph_status?: string;
+    warnings?: string[];
   };
 };
 
@@ -49,75 +61,64 @@ type AnalysisState = {
   result?: BackendAnalysisResponse | null;
 };
 
-type ImageMeta = {
-  width: number | undefined;
-  height: number | undefined;
-  size: string;
-};
-
-const MODEL_PERFORMANCE = {
-  iou: 54.89,
-  dice: 70.88,
-  threshold: 0.4,
-  testSetImages: 846,
-};
-
-const PROCESSING_STEPS = ["VALIDATING IMAGE", "ROAD EXTRACTION", "NETWORK PREPARATION"];
-const SAVED_ANALYSIS_KEY = "route-resilience.analysis-id";
-
-const LAYER_OPTIONS: { key: LayerKey; label: string }[] = [
-  { key: "satellite", label: "SATELLITE" },
-  { key: "roads", label: "AI ROADS" },
-  { key: "repaired", label: "REPAIRED" },
-  { key: "skeleton", label: "ROAD SKELETON" },
-];
-
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-async function analyzeRoadImage(file: File): Promise<BackendAnalysisResponse | { status: "error"; message: string }> {
+function formatDate(dateStr?: string): string {
+  if (!dateStr) return "Recent";
+  try {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return "Recent";
+    return new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(d);
+  } catch {
+    return "Recent";
+  }
+}
+
+async function analyzeRoadImage(
+  file: File,
+): Promise<BackendAnalysisResponse | { status: "error"; message: string }> {
   const formData = new FormData();
   formData.append("file", file);
-
   try {
-    const response = await fetch("http://127.0.0.1:8000/api/road-analysis", {
+    const response = await fetch(`${API_BASE}/api/road-analysis`, {
       method: "POST",
       body: formData,
     });
-
     if (!response.ok) {
-      let message = `The analysis backend returned an error (${response.status}).`;
+      let message = `Analysis failed (${response.status}).`;
       try {
-        const errorPayload = (await response.json()) as { detail?: string | Record<string, unknown> };
-        if (typeof errorPayload.detail === "string") {
-          message = errorPayload.detail;
-        } else if (errorPayload.detail) {
-          message = JSON.stringify(errorPayload.detail);
-        }
+        const errorPayload = (await response.json()) as {
+          detail?: string | Record<string, unknown>;
+        };
+        if (typeof errorPayload.detail === "string") message = errorPayload.detail;
+        else if (errorPayload.detail) message = JSON.stringify(errorPayload.detail);
       } catch {
         const errorText = await response.text();
         if (errorText) message = errorText;
       }
-      return {
-        status: "error",
-        message,
-      };
+      return { status: "error", message };
     }
-
     const payload = (await response.json()) as BackendAnalysisResponse;
     if (payload.status !== "completed" || !payload.analysis_id || !payload.artifacts) {
-      return { status: "error", message: "The analysis backend returned an incomplete result." };
+      return { status: "error", message: "Incomplete result returned by the backend." };
     }
     return payload;
   } catch (error) {
     return {
       status: "error",
-      message: error instanceof TypeError
-        ? "The analysis backend is unavailable. Start the FastAPI server on 127.0.0.1:8000 and try again."
-        : "The analysis request failed. Please try again.",
+      message:
+        error instanceof TypeError
+          ? "The analysis server is offline. Please ensure the backend is running."
+          : "The analysis request failed. Please try again.",
     };
   }
 }
@@ -125,8 +126,11 @@ async function analyzeRoadImage(file: File): Promise<BackendAnalysisResponse | {
 export const Route = createFileRoute("/explore")({
   head: () => ({
     meta: [
-      { title: "Explore — ROUTE RESILIENCE" },
-      { name: "description", content: "Upload a satellite image and run AI road extraction." },
+      { title: "Route Resilience" },
+      {
+        name: "description",
+        content: "Upload satellite imagery to extract road networks and evaluate network resilience.",
+      },
     ],
   }),
   component: ExplorePage,
@@ -136,53 +140,50 @@ function ExplorePage() {
   const navigate = useNavigate();
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [imageMeta, setImageMeta] = useState<ImageMeta | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [analysis, setAnalysis] = useState<AnalysisState>({ phase: "idle" });
-  const [activeLayer, setActiveLayer] = useState<LayerKey>("satellite");
-  const [pointer, setPointer] = useState({ x: 0, y: 0 });
+  const [history, setHistory] = useState<AnalysisItem[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState<"new" | "history">("new");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  useEffect(() => {
-    const onPointerMove = (event: PointerEvent) => {
-      setPointer({
-        x: (event.clientX / window.innerWidth - 0.5) * 2,
-        y: (event.clientY / window.innerHeight - 0.5) * 2,
-      });
-    };
+  // Load history from backend & local storage
+  const loadHistory = async () => {
+    setHistoryLoading(true);
+    try {
+      const items = await getAnalyses();
+      setHistory(items);
+    } catch {
+      setHistory([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
 
-    window.addEventListener("pointermove", onPointerMove, { passive: true });
-    return () => window.removeEventListener("pointermove", onPointerMove);
+  useEffect(() => {
+    void loadHistory();
   }, []);
 
+  // Check saved analysis on first mount
   useEffect(() => {
-    const savedAnalysisId = window.localStorage.getItem(SAVED_ANALYSIS_KEY);
-    if (!savedAnalysisId) return;
+    const savedId = window.localStorage.getItem(SAVED_ANALYSIS_KEY);
+    if (!savedId) return;
 
     const controller = new AbortController();
-    setAnalysis({ phase: "processing", message: "Restoring current analysis..." });
-
-    fetch(`http://127.0.0.1:8000/api/analysis/${encodeURIComponent(savedAnalysisId)}`, {
+    fetch(`${API_BASE}/api/analysis/${encodeURIComponent(savedId)}`, {
       signal: controller.signal,
     })
-      .then(async (response) => {
-        const payload = (await response.json()) as BackendAnalysisResponse | { detail?: string };
-        if (!response.ok) {
-          const detail = "detail" in payload ? payload.detail : undefined;
-          throw new Error(typeof detail === "string" ? detail : `Analysis restore failed (${response.status}).`);
-        }
-        return payload as BackendAnalysisResponse;
+      .then(async (res) => {
+        if (!res.ok) throw new Error("Could not restore saved analysis");
+        return (await res.json()) as BackendAnalysisResponse;
       })
       .then((payload) => {
-        if (payload.status !== "completed" || payload.analysis_id !== savedAnalysisId || !payload.artifacts) {
-          throw new Error("The saved analysis is incomplete.");
+        if (payload.status === "completed" && payload.analysis_id === savedId) {
+          setAnalysis({ phase: "success", result: payload });
         }
-        setAnalysis({ phase: "success", result: payload });
       })
-      .catch((error: unknown) => {
-        if (error instanceof DOMException && error.name === "AbortError") return;
-        window.localStorage.removeItem(SAVED_ANALYSIS_KEY);
-        setAnalysis({ phase: "idle" });
+      .catch(() => {
+        // Safe to ignore restore failures
       });
 
     return () => controller.abort();
@@ -191,48 +192,25 @@ function ExplorePage() {
   useEffect(() => {
     if (!selectedFile) {
       setPreviewUrl(null);
-      setImageMeta(null);
       return;
     }
-
     const nextUrl = URL.createObjectURL(selectedFile);
     setPreviewUrl(nextUrl);
-    setImageMeta({
-      width: undefined,
-      height: undefined,
-      size: formatFileSize(selectedFile.size),
-    });
-
-    const img = new Image();
-    img.onload = () => {
-      setImageMeta((current) => ({
-        ...current,
-        size: current?.size ?? formatFileSize(selectedFile.size),
-        width: img.width,
-        height: img.height,
-      }));
-    };
-    img.src = nextUrl;
-
     return () => URL.revokeObjectURL(nextUrl);
   }, [selectedFile]);
 
   const handleFileSelection = (file: File | null | undefined) => {
     if (!file) return;
-    const isValidType = ["image/png", "image/jpeg", "image/jpg"].includes(file.type) || /\.(png|jpe?g)$/i.test(file.name);
-
+    const isValidType =
+      ["image/png", "image/jpeg", "image/jpg"].includes(file.type) ||
+      /\.(png|jpe?g)$/i.test(file.name);
     if (!isValidType) {
       setAnalysis({ phase: "error", message: "Please upload a PNG or JPG/JPEG image." });
       return;
     }
-
-    window.localStorage.removeItem(SAVED_ANALYSIS_KEY);
     setSelectedFile(file);
     setAnalysis({ phase: "idle" });
-  };
-
-  const handleInputChange = (event: ChangeEvent<HTMLInputElement>) => {
-    handleFileSelection(event.target.files?.[0]);
+    setActiveTab("new");
   };
 
   const handleDrop = (event: DragEvent<HTMLDivElement>) => {
@@ -243,93 +221,112 @@ function ExplorePage() {
 
   const runRoadAnalysis = async () => {
     if (!selectedFile) {
-      setAnalysis({ phase: "error", message: "Select a satellite image before running the analysis." });
+      setAnalysis({
+        phase: "error",
+        message: "Please choose a satellite image before running analysis.",
+      });
       return;
     }
-
-    setAnalysis({ phase: "processing", message: "Running AI road extraction..." });
-
+    setAnalysis({ phase: "processing", message: "Extracting road topology and healing gaps..." });
     const response = await analyzeRoadImage(selectedFile);
-
     if (response.status === "completed") {
       window.localStorage.setItem(SAVED_ANALYSIS_KEY, response.analysis_id);
+      saveAnalysisToHistory({
+        analysis_id: response.analysis_id,
+        status: "completed",
+        created_at: new Date().toISOString(),
+        input_image_name: selectedFile.name,
+        input_image_ref: response.input_image_ref,
+        artifacts: response.artifacts,
+        summary: response.summary,
+      });
       setAnalysis({ phase: "success", result: response });
+      void loadHistory();
       return;
     }
-
     setAnalysis({ phase: "error", message: response.message });
   };
 
-  const getImageSource = () => {
-    if (analysis.phase === "success" && analysis.result) {
-      const artifacts = analysis.result.artifacts;
-      if (activeLayer === "satellite") return artifacts.original ?? analysis.result.input_image_ref;
-      if (activeLayer === "roads") return artifacts.binary_mask ?? null;
-      if (activeLayer === "repaired") return artifacts.visualization ?? null;
-      if (activeLayer === "skeleton") return artifacts.skeleton ?? null;
-    }
-
-    return selectedFile && previewUrl ? previewUrl : null;
-  };
-
-  const resetAnalysis = () => {
-    window.localStorage.removeItem(SAVED_ANALYSIS_KEY);
+  const startNewAnalysis = () => {
     setSelectedFile(null);
     setAnalysis({ phase: "idle" });
-    setActiveLayer("satellite");
     if (fileInputRef.current) fileInputRef.current.value = "";
+    setActiveTab("new");
   };
 
-  const viewCurrentNetwork = (analysisId: string) => {
-    void navigate({
-      to: "/network",
-      search: { analysis: analysisId },
-    });
+  const reopenAnalysis = (item: AnalysisItem) => {
+    window.localStorage.setItem(SAVED_ANALYSIS_KEY, item.analysis_id);
+    void navigate({ to: "/network", search: { analysis: item.analysis_id } });
   };
 
-  const currentImage = getImageSource();
-  const isResultVisible = analysis.phase === "success" && analysis.result;
-  const imageSummary = analysis.result?.summary;
+  const isProcessing = analysis.phase === "processing";
+  const completedResult = analysis.phase === "success" ? analysis.result : null;
 
   return (
-    <main className="relative isolate min-h-screen bg-background text-foreground">
-      <div aria-hidden className="pointer-events-none absolute inset-0 z-0">
-        <div className="explore-bg-grid absolute inset-0 opacity-[0.04]" />
-        <div className="explore-bg-radial absolute inset-0" />
+    <main className="workflow-page min-h-[calc(100vh-104px)] px-5 py-8 text-foreground sm:px-8 max-w-6xl mx-auto">
+      {/* Page Header */}
+      <div className="mb-8 border-b border-border pb-5 flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="inline-flex items-center rounded-md bg-teal-500/10 px-2 py-0.5 text-xs font-semibold text-teal-700 dark:text-teal-300 border border-teal-500/20">
+              01 · Analyze
+            </span>
+            <span className="text-xs text-muted-foreground">Step 1 of 5</span>
+          </div>
+          <h1 className="mt-2 text-2xl sm:text-3xl font-bold tracking-tight text-foreground">
+            Satellite Road Network Extraction
+          </h1>
+          <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-muted-foreground">
+            Upload high-resolution satellite imagery to extract topological roads, bridge
+            occlusions, and generate a traversable network graph.
+          </p>
+        </div>
+
+        {/* Tab switch between new analysis and previous analyses */}
+        <div className="flex items-center gap-1 p-1 bg-muted/40 rounded-xl border border-border text-xs font-medium self-start sm:self-end text-muted-foreground">
+          <button
+            type="button"
+            onClick={() => setActiveTab("new")}
+            className={`px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 ${
+              activeTab === "new"
+                ? "bg-card text-foreground shadow-2xs border border-border/80 font-semibold"
+                : "hover:text-foreground"
+            }`}
+          >
+            <Plus size={14} />
+            <span>New Upload</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("history")}
+            className={`px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 ${
+              activeTab === "history"
+                ? "bg-card text-foreground shadow-2xs border border-border/80 font-semibold"
+                : "hover:text-foreground"
+            }`}
+          >
+            <Clock size={14} />
+            <span>Previous Analyses ({history.length})</span>
+          </button>
+        </div>
       </div>
 
-      <svg
-        aria-hidden
-        className="pointer-events-none absolute inset-0 z-[1] h-full w-full opacity-25 mix-blend-screen"
-        viewBox="0 0 1440 900"
-        preserveAspectRatio="xMidYMid slice"
-        style={{ transform: `translate3d(${pointer.x * 4}px, ${pointer.y * 4}px, 0)` }}
-      >
-        <path className="route-line" d="M-90 720 C 140 650, 180 770, 360 674 S 610 490, 760 566 S 970 750, 1170 588 S 1340 390, 1530 330" fill="none" stroke="var(--primary)" strokeWidth="1" strokeDasharray="7 15" />
-        <path className="route-line" d="M210 -60 C 290 90, 210 226, 376 320 S 540 454, 496 624 S 590 810, 746 970" fill="none" stroke="var(--accent)" strokeWidth="0.8" strokeDasharray="4 18" />
-        <circle cx="760" cy="566" r="3" fill="var(--primary)" opacity="0.7" />
-        <circle cx="760" cy="566" r="10" fill="none" stroke="var(--primary)" strokeWidth="0.6" opacity="0.4" />
-      </svg>
+      {/* Main Content Layout */}
+      {activeTab === "new" && (
+        <div className="grid gap-8 lg:grid-cols-[1fr_340px]">
+          {/* Uploader Card */}
+          <section className="rounded-xl border border-border bg-card p-6 sm:p-8 shadow-xs">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/jpg"
+              className="hidden"
+              onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                handleFileSelection(event.target.files?.[0])
+              }
+            />
 
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 z-[2] opacity-20 [background-image:url('data:image/svg+xml,%3Csvg viewBox=%220 0 180 180%22 xmlns=%22http://www.w3.org/2000/svg%22%3E%3Cfilter id=%22n%22%3E%3CfeTurbulence type=%22fractalNoise%22 baseFrequency=%22.85%22 numOctaves=%224%22 stitchTiles=%22stitch%22/%3E%3C/filter%3E%3Crect width=%22100%25%22 height=%22100%25%22 filter=%22url(%23n)%22 opacity=%22.34%22/%3E%3C/svg%3E')]"
-      />
-
-      <Navbar />
-
-      <header className="relative z-10 border-b border-border/30 px-6 py-8 sm:px-10 lg:px-14">
-        <p className="mb-2 font-display text-[0.6rem] tracking-[0.28em] text-primary/70">
-          ISRO <span className="px-1 text-foreground/40">•</span> BAH 2026 <span className="px-1 text-foreground/40">•</span> AI EXTRACTION
-        </p>
-        <h1 className="font-display text-3xl font-medium tracking-[-0.03em] text-foreground sm:text-4xl">
-          What does our AI <span className="text-primary">see</span> in this image?
-        </h1>
-      </header>
-
-      <div className="relative z-10 px-6 py-8 sm:px-10 lg:px-14">
-        <div className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
-          <aside className="space-y-4">
+            {/* Dropzone */}
             <div
               onDragOver={(event) => {
                 event.preventDefault();
@@ -337,275 +334,424 @@ function ExplorePage() {
               }}
               onDragLeave={() => setIsDragging(false)}
               onDrop={handleDrop}
-              className={`relative overflow-hidden border border-dashed p-5 transition-all duration-300 ${
-                isDragging ? "border-primary bg-primary/5" : "border-border/70 bg-card/40"
+              className={`rounded-xl border-2 border-dashed p-8 sm:p-12 text-center transition-all ${
+                isDragging
+                  ? "border-primary bg-primary/10"
+                  : "border-border bg-muted/20 hover:border-teal-500/80 hover:bg-muted/40"
               }`}
             >
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/png,image/jpeg,image/jpg"
-                className="hidden"
-                onChange={handleInputChange}
-              />
-
-              <div className="flex items-center justify-between">
-                <p className="font-display text-[0.62rem] tracking-[0.18em] text-primary uppercase">INPUT</p>
+              <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-teal-500/10 text-teal-600 dark:text-teal-400 border border-teal-500/20">
+                <UploadCloud size={28} strokeWidth={2} />
               </div>
-
-              <div className="mt-5 flex flex-col items-center justify-center rounded-md border border-border/50 bg-background/50 px-4 py-8 text-center">
-                <UploadCloud className="h-10 w-10 text-primary" strokeWidth={1.3} />
-                <p className="mt-4 font-display text-[0.68rem] tracking-[0.15em] text-foreground uppercase">
-                  Drag & drop image
-                </p>
-                <p className="mt-2 text-xs text-muted-foreground">or browse to select a PNG / JPG / JPEG</p>
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  className="mt-5 inline-flex items-center gap-2 border border-primary/70 bg-primary/10 px-4 py-2 font-display text-[0.58rem] tracking-[0.16em] text-primary transition-colors hover:bg-primary/20"
-                >
-                  <FileImage size={14} />
-                  BROWSE IMAGE
-                </button>
-              </div>
+              <h2 className="mt-4 text-base sm:text-lg font-bold text-foreground">
+                Drag and drop your satellite image
+              </h2>
+              <p className="mt-1.5 text-xs sm:text-sm text-muted-foreground max-w-sm mx-auto">
+                Supports standard high-resolution aerial and satellite tiles (PNG, JPG, JPEG).
+              </p>
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isProcessing}
+                className="mt-5 inline-flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-2 text-xs font-semibold text-foreground shadow-2xs transition hover:border-primary hover:text-primary disabled:opacity-50"
+              >
+                <FileImage size={15} />
+                <span>Browse files</span>
+              </button>
             </div>
 
+            {/* Selected File Details */}
             {selectedFile && (
-              <div className="border border-border/60 bg-card/40 p-4 backdrop-blur-sm">
-                <p className="font-display text-[0.56rem] tracking-[0.16em] text-muted-foreground uppercase">FILE</p>
-                <div className="mt-3 space-y-2 text-sm">
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-muted-foreground">Name</span>
-                    <span className="max-w-[180px] truncate text-right text-foreground">{selectedFile.name}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-muted-foreground">Size</span>
-                    <span className="text-foreground">{formatFileSize(selectedFile.size)}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-muted-foreground">Dimensions</span>
-                    <span className="text-foreground">
-                      {imageMeta?.width && imageMeta?.height ? `${imageMeta.width} × ${imageMeta.height}px` : "Loading…"}
-                    </span>
+              <div className="mt-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 rounded-xl border border-border bg-muted/30 p-4">
+                <div className="flex items-center gap-3 min-w-0">
+                  {previewUrl ? (
+                    <img
+                      src={previewUrl}
+                      alt="Thumbnail preview"
+                      className="h-12 w-12 rounded-lg object-cover border border-border shrink-0 satellite-imagery"
+                      style={{ filter: "none" }}
+                    />
+                  ) : (
+                    <div className="h-12 w-12 rounded-lg bg-teal-500/10 text-teal-600 dark:text-teal-400 flex items-center justify-center shrink-0 border border-teal-500/20">
+                      <FileImage size={20} />
+                    </div>
+                  )}
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-foreground">
+                      {selectedFile.name}
+                    </p>
+                    <p className="text-xs text-muted-foreground">{formatFileSize(selectedFile.size)}</p>
                   </div>
                 </div>
-              </div>
-            )}
 
-            {analysis.phase === "success" && analysis.result && (
-              <div className="border border-primary/40 bg-primary/5 p-4 backdrop-blur-sm">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <p className="font-display text-[0.56rem] tracking-[0.16em] text-primary uppercase">CURRENT ANALYSIS</p>
-                    <p className="mt-2 font-display text-[0.68rem] tracking-[0.12em] text-foreground uppercase">ANALYSIS READY</p>
-                  </div>
-                  <CheckCircle2 className="h-5 w-5 text-primary" />
-                </div>
-                <p className="mt-3 truncate text-sm text-foreground/80">
-                  {analysis.result.input_image_name ?? "Restored uploaded image"}
-                </p>
-                <p className="mt-1 break-all font-mono text-[0.68rem] text-muted-foreground">{analysis.result.analysis_id}</p>
-                <div className="mt-4 grid gap-2 sm:grid-cols-2">
-                  <Link
-                    to="/network"
-                    search={{ analysis: analysis.result.analysis_id }}
-                    onClick={(event) => {
-                      event.preventDefault();
-                      viewCurrentNetwork(analysis.result!.analysis_id);
-                    }}
-                    className="inline-flex items-center justify-center gap-2 border border-primary/70 bg-primary/10 px-3 py-2 font-display text-[0.56rem] tracking-[0.16em] text-primary transition-colors hover:bg-primary/20"
-                  >
-                    VIEW NETWORK <ArrowRight size={13} />
-                  </Link>
+                <div className="flex items-center gap-2 self-end sm:self-center">
                   <button
                     type="button"
-                    onClick={resetAnalysis}
-                    className="border border-border/70 px-3 py-2 font-display text-[0.56rem] tracking-[0.16em] text-foreground/70 transition-colors hover:border-primary/50 hover:text-primary"
+                    onClick={startNewAnalysis}
+                    disabled={isProcessing}
+                    className="text-xs font-medium text-muted-foreground hover:text-destructive px-2 py-1 transition"
                   >
-                    NEW ANALYSIS
+                    Remove
                   </button>
                 </div>
               </div>
             )}
 
-            <button
-              type="button"
-              onClick={runRoadAnalysis}
-              disabled={!selectedFile || analysis.phase === "processing"}
-              className="flex w-full items-center justify-between border border-primary/70 bg-primary px-4 py-3 font-display text-[0.62rem] tracking-[0.18em] text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <span>RUN ROAD ANALYSIS</span>
-              <ArrowRight size={15} />
-            </button>
-          </aside>
-
-          <section className="space-y-5">
-            {analysis.phase === "idle" && !selectedFile && (
-              <div className="flex min-h-[420px] items-center justify-center border border-border/50 bg-card/30 p-10 text-center">
-                <div>
-                  <ImageIcon className="mx-auto h-10 w-10 text-muted-foreground" strokeWidth={1.2} />
-                  <p className="mt-4 font-display text-[0.7rem] tracking-[0.18em] text-muted-foreground uppercase">
-                    Upload a satellite image to begin
-                  </p>
-                </div>
+            {/* Error Message */}
+            {analysis.phase === "error" && (
+              <div
+                role="alert"
+                className="mt-5 flex items-start gap-3 rounded-xl border border-destructive/40 bg-destructive/10 p-4 text-xs sm:text-sm text-destructive"
+              >
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+                <div className="flex-1">{analysis.message}</div>
               </div>
             )}
 
-            {analysis.phase === "idle" && selectedFile && !analysis.result && (
-              <div className="border border-border/50 bg-card/30 p-4">
-                <div className="mb-3 flex items-center gap-2">
-                  <CheckCircle2 className="h-4 w-4 text-primary" />
-                  <p className="font-display text-[0.56rem] tracking-[0.16em] text-primary uppercase">READY FOR ANALYSIS</p>
+            {/* Processing State */}
+            {isProcessing && (
+              <div className="mt-5 rounded-xl border border-teal-500/30 bg-teal-500/10 p-5">
+                <div className="flex items-center gap-3 text-sm font-semibold text-teal-700 dark:text-teal-300">
+                  <LoaderCircle className="h-5 w-5 animate-spin" />
+                  <span>{analysis.message ?? "Analyzing satellite imagery..."}</span>
                 </div>
-                {previewUrl && (
-                  <img
-                    src={previewUrl}
-                    alt="Selected satellite input preview"
-                    className="h-[320px] w-full object-contain border border-border/50 bg-background/50"
-                  />
-                )}
+                <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-teal-500/20">
+                  <div className="h-full w-2/3 animate-pulse rounded-full bg-teal-600 dark:bg-teal-400" />
+                </div>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Segmenting road footprints, skeletonizing centerlines, and validating topological
+                  corridors.
+                </p>
               </div>
             )}
 
-            {(analysis.phase === "processing" || analysis.phase === "success" || analysis.phase === "error") && (
-              <div className="space-y-4">
-                {analysis.phase === "processing" && (
-                  <div className="border border-border/60 bg-card/30 p-5">
-                    <div className="flex items-center gap-3 text-primary">
-                      <LoaderCircle className="h-4 w-4 animate-spin" />
-                      <p className="font-display text-[0.62rem] tracking-[0.18em] uppercase">PROCESSING</p>
-                    </div>
-                    <div className="mt-4 flex flex-wrap gap-2">
-                      {PROCESSING_STEPS.map((step) => (
-                        <span key={step} className="border border-border/60 bg-background/40 px-3 py-2 font-display text-[0.52rem] tracking-[0.16em] text-foreground/80">
-                          {step}
-                        </span>
-                      ))}
-                    </div>
+            {/* Completed Result Card */}
+            {completedResult && (
+              <div className="mt-6 rounded-xl border border-teal-500/40 bg-teal-500/10 p-5 sm:p-6">
+                <div className="flex items-start gap-3.5">
+                  <div className="rounded-xl bg-teal-500/20 p-2 text-teal-700 dark:text-teal-300 shrink-0 border border-teal-500/30">
+                    <CheckCircle2 className="h-5 w-5" />
                   </div>
-                )}
+                  <div className="flex-1 min-w-0">
+                    <h3 className="text-sm font-bold text-foreground">
+                      Road network extracted successfully
+                    </h3>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Topology reconstruction is complete. You can now inspect critical lifelines or
+                      simulate disruptions.
+                    </p>
 
-                {analysis.phase === "error" && (
-                  <div className="border border-amber-500/40 bg-amber-500/5 p-5 text-amber-200">
-                    <div className="flex items-center gap-2">
-                      <AlertTriangle className="h-4 w-4" />
-                      <p className="font-display text-[0.58rem] tracking-[0.18em] uppercase">INPUT ERROR</p>
-                    </div>
-                    <p className="mt-3 text-sm text-amber-100">{analysis.message}</p>
-                  </div>
-                )}
-
-                {analysis.phase === "success" && analysis.result && (
-                  <>
-                    <div className="border border-border/60 bg-card/30 p-3">
-                      <div className="mb-3 flex items-center gap-1 self-start border border-border/60 p-1 backdrop-blur-sm bg-card/60">
-                        {LAYER_OPTIONS.map(({ key, label }) => (
-                          <button
-                            key={key}
-                            type="button"
-                            onClick={() => setActiveLayer(key)}
-                            className={`px-3 py-2 font-display text-[0.56rem] tracking-[0.16em] transition-all duration-200 ${
-                              activeLayer === key ? "bg-primary text-primary-foreground" : "text-foreground/60 hover:text-foreground hover:bg-secondary/60"
-                            }`}
-                          >
-                            {label}
-                          </button>
-                        ))}
-                      </div>
-
-                      {currentImage ? (
-                        <img
-                          src={currentImage}
-                          alt="Road extraction result"
-                          className="h-[380px] w-full border border-border/60 bg-background/50 object-contain"
-                        />
-                      ) : (
-                        <div className="flex h-[380px] items-center justify-center border border-border/60 bg-background/50 text-sm text-muted-foreground">
-                          No result available for this layer.
+                    {completedResult.summary && (
+                      <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                        <div className="bg-card rounded-lg p-2.5 border border-border text-center">
+                          <span className="block text-[0.62rem] font-bold text-teal-600 dark:text-teal-400 uppercase tracking-wider">
+                            Nodes
+                          </span>
+                          <span className="text-sm font-bold text-foreground font-mono">
+                            {completedResult.summary.after_healing?.n_nodes ?? "—"}
+                          </span>
                         </div>
-                      )}
-                    </div>
-
-                    <div className="grid gap-4 lg:grid-cols-2">
-                      <div className="border border-border/60 bg-card/30 p-4">
-                        <p className="font-display text-[0.56rem] tracking-[0.18em] text-muted-foreground uppercase">EXTRACTION SUMMARY</p>
-                        <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
-                          {imageSummary?.after_healing?.n_nodes !== undefined && (
-                            <div className="border border-border/50 bg-background/40 p-3">
-                              <p className="text-[0.55rem] tracking-[0.12em] text-muted-foreground uppercase">Healed graph nodes</p>
-                              <p className="mt-2 text-lg font-medium text-primary">{imageSummary.after_healing.n_nodes}</p>
-                            </div>
-                          )}
-                          {imageSummary?.after_healing?.n_edges !== undefined && (
-                            <div className="border border-border/50 bg-background/40 p-3">
-                              <p className="text-[0.55rem] tracking-[0.12em] text-muted-foreground uppercase">Healed graph edges</p>
-                              <p className="mt-2 text-lg font-medium text-primary">{imageSummary.after_healing.n_edges}</p>
-                            </div>
-                          )}
-                          {imageSummary?.healed_edge_count !== undefined && (
-                            <div className="border border-border/50 bg-background/40 p-3">
-                              <p className="text-[0.55rem] tracking-[0.12em] text-muted-foreground uppercase">Healed edges</p>
-                              <p className="mt-2 text-lg font-medium text-primary">{imageSummary.healed_edge_count}</p>
-                            </div>
-                          )}
-                          {imageSummary?.threshold !== undefined && (
-                            <div className="border border-border/50 bg-background/40 p-3">
-                              <p className="text-[0.55rem] tracking-[0.12em] text-muted-foreground uppercase">Threshold</p>
-                              <p className="mt-2 text-lg font-medium text-primary">{imageSummary.threshold}</p>
-                            </div>
-                          )}
-                          {analysis.result.analysis_id && (
-                            <div className="border border-border/50 bg-background/40 p-3 sm:col-span-2">
-                              <p className="text-[0.55rem] tracking-[0.12em] text-muted-foreground uppercase">Analysis ID</p>
-                              <p className="mt-2 break-all text-sm font-medium text-primary">{analysis.result.analysis_id}</p>
-                            </div>
-                          )}
+                        <div className="bg-card rounded-lg p-2.5 border border-border text-center">
+                          <span className="block text-[0.62rem] font-bold text-teal-600 dark:text-teal-400 uppercase tracking-wider">
+                            Edges
+                          </span>
+                          <span className="text-sm font-bold text-foreground font-mono">
+                            {completedResult.summary.after_healing?.n_edges ?? "—"}
+                          </span>
+                        </div>
+                        <div className="bg-card rounded-lg p-2.5 border border-border text-center">
+                          <span className="block text-[0.62rem] font-bold text-teal-600 dark:text-teal-400 uppercase tracking-wider">
+                            Components
+                          </span>
+                          <span className="text-sm font-bold text-foreground font-mono">
+                            {completedResult.summary.after_healing?.n_components ?? "—"}
+                          </span>
+                        </div>
+                        <div className="bg-card rounded-lg p-2.5 border border-border text-center">
+                          <span className="block text-[0.62rem] font-bold text-teal-600 dark:text-teal-400 uppercase tracking-wider">
+                            Routable
+                          </span>
+                          <span className="text-sm font-bold text-foreground font-mono">
+                            {completedResult.summary.graph_quality?.routable_component_count ?? 1}
+                          </span>
                         </div>
                       </div>
+                    )}
 
-                      <div className="border border-border/60 bg-card/30 p-4">
-                        <p className="font-display text-[0.56rem] tracking-[0.18em] text-muted-foreground uppercase">MODEL PERFORMANCE · TEST SET · 846 IMAGES</p>
-                        <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
-                          <div className="border border-border/50 bg-background/40 p-3">
-                            <p className="text-[0.55rem] tracking-[0.12em] text-muted-foreground uppercase">IoU</p>
-                            <p className="mt-2 text-lg font-medium text-primary">{MODEL_PERFORMANCE.iou.toFixed(2)}%</p>
-                          </div>
-                          <div className="border border-border/50 bg-background/40 p-3">
-                            <p className="text-[0.55rem] tracking-[0.12em] text-muted-foreground uppercase">Dice</p>
-                            <p className="mt-2 text-lg font-medium text-primary">{MODEL_PERFORMANCE.dice.toFixed(2)}%</p>
-                          </div>
-                          <div className="border border-border/50 bg-background/40 p-3">
-                            <p className="text-[0.55rem] tracking-[0.12em] text-muted-foreground uppercase">Threshold</p>
-                            <p className="mt-2 text-lg font-medium text-primary">{MODEL_PERFORMANCE.threshold}</p>
-                          </div>
-                          <div className="border border-border/50 bg-background/40 p-3">
-                            <p className="text-[0.55rem] tracking-[0.12em] text-muted-foreground uppercase">Test set</p>
-                            <p className="mt-2 text-lg font-medium text-primary">{MODEL_PERFORMANCE.testSetImages}</p>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="flex justify-end pt-2">
-                      <Link
-                        to="/network"
-                        search={{ analysis: analysis.result.analysis_id }}
-                        onClick={(event) => {
-                          event.preventDefault();
-                          viewCurrentNetwork(analysis.result!.analysis_id);
-                        }}
-                        className="group inline-flex items-center gap-3 border border-primary/70 bg-primary/10 px-4 py-3 font-display text-[0.62rem] tracking-[0.18em] text-primary transition-colors hover:bg-primary/20"
+                    <div className="mt-5 flex flex-wrap items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void navigate({
+                            to: "/network",
+                            search: { analysis: completedResult.analysis_id },
+                          })
+                        }
+                        className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-xs font-semibold text-primary-foreground shadow-xs hover:bg-primary/90 transition"
                       >
-                        ANALYZE NETWORK <ArrowRight size={15} className="transition-transform duration-300 group-hover:translate-x-1" />
-                      </Link>
+                        <span>Open in Network</span>
+                        <ArrowRight size={14} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={startNewAnalysis}
+                        className="rounded-lg border border-border bg-card px-4 py-2.5 text-xs font-semibold text-foreground hover:bg-muted/60 transition shadow-2xs"
+                      >
+                        Start another analysis
+                      </button>
                     </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Run Analysis Trigger Button */}
+            {!completedResult && (
+              <button
+                type="button"
+                onClick={runRoadAnalysis}
+                disabled={!selectedFile || isProcessing}
+                className="mt-6 inline-flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-5 py-3 text-sm font-semibold text-primary-foreground shadow-xs transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {isProcessing ? (
+                  <>
+                    <LoaderCircle className="h-4 w-4 animate-spin" />
+                    <span>Analyzing Image...</span>
+                  </>
+                ) : (
+                  <>
+                    <Sparkles size={16} />
+                    <span>Extract Road Network</span>
                   </>
                 )}
-              </div>
+              </button>
             )}
           </section>
+
+          {/* Quick Info & Recent Analyses Sidebar */}
+          <aside className="flex flex-col gap-5">
+            {/* Quick Helper Box */}
+            <div className="rounded-xl border border-border bg-card p-5 shadow-xs">
+              <h3 className="text-xs font-bold text-foreground uppercase tracking-wider flex items-center gap-2">
+                <Network size={15} className="text-teal-600 dark:text-teal-400" />
+                <span>Pipeline Stages</span>
+              </h3>
+              <ol className="mt-3.5 space-y-2.5 text-xs text-muted-foreground">
+                <li className="flex gap-2">
+                  <span className="font-bold text-teal-600 dark:text-teal-400">1.</span>
+                  <span>
+                    <strong className="text-foreground">Segmentation:</strong> Detects road footprints from RGB satellite
+                    imagery.
+                  </span>
+                </li>
+                <li className="flex gap-2">
+                  <span className="font-bold text-teal-600 dark:text-teal-400">2.</span>
+                  <span>
+                    <strong className="text-foreground">Skeletonization:</strong> Thins footprints to a 1-pixel centerline
+                    topological graph.
+                  </span>
+                </li>
+                <li className="flex gap-2">
+                  <span className="font-bold text-teal-600 dark:text-teal-400">3.</span>
+                  <span>
+                    <strong className="text-foreground">Occlusion Healing:</strong> Reconstructs severed roads through clouds
+                    and canopy.
+                  </span>
+                </li>
+                <li className="flex gap-2">
+                  <span className="font-bold text-teal-600 dark:text-teal-400">4.</span>
+                  <span>
+                    <strong className="text-foreground">Resilience Audit:</strong> Evaluates connectivity and isolates critical
+                    lifelines.
+                  </span>
+                </li>
+              </ol>
+            </div>
+
+            {/* Recent History Preview */}
+            <div className="rounded-xl border border-border bg-card p-5 shadow-xs">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-bold text-foreground uppercase tracking-wider flex items-center gap-1.5">
+                  <Clock size={14} className="text-muted-foreground" />
+                  <span>Recent Analyses</span>
+                </h3>
+                {history.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab("history")}
+                    className="text-xs text-teal-600 dark:text-teal-400 font-medium hover:underline"
+                  >
+                    View all
+                  </button>
+                )}
+              </div>
+
+              {historyLoading ? (
+                <div className="py-6 text-center text-xs text-muted-foreground">
+                  <LoaderCircle className="h-4 w-4 animate-spin mx-auto mb-1.5 text-muted-foreground" />
+                  Loading history...
+                </div>
+              ) : history.length === 0 ? (
+                <p className="mt-3 text-xs text-muted-foreground">
+                  No previous analyses found yet. Run an analysis above to save it here.
+                </p>
+              ) : (
+                <div className="mt-3.5 divide-y divide-border">
+                  {history.slice(0, 4).map((item) => (
+                    <div
+                      key={item.analysis_id}
+                      onClick={() => reopenAnalysis(item)}
+                      className="py-2.5 first:pt-0 last:pb-0 flex items-center justify-between gap-3 cursor-pointer group"
+                    >
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold text-foreground truncate group-hover:text-teal-600 dark:group-hover:text-teal-400 transition">
+                          {item.input_image_name ?? `Analysis #${item.analysis_id.slice(0, 8)}`}
+                        </p>
+                        <p className="text-[0.68rem] text-muted-foreground">
+                          {formatDate(item.created_at)}
+                        </p>
+                      </div>
+                      <span className="shrink-0 text-muted-foreground group-hover:text-teal-600 dark:group-hover:text-teal-400 transition">
+                        <ArrowRight size={14} />
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </aside>
         </div>
-      </div>
+      )}
+
+      {/* History Cards Tab */}
+      {activeTab === "history" && (
+        <section aria-label="Analysis History">
+          <div className="flex items-center justify-between mb-5">
+            <div>
+              <h2 className="text-lg font-bold text-foreground">Analysis History</h2>
+              <p className="text-xs text-muted-foreground">
+                Click any previously evaluated network to reopen it directly in the interactive
+                workspace.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => void loadHistory()}
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-foreground hover:text-teal-600 dark:hover:text-teal-400 bg-card border border-border rounded-lg px-3 py-1.5 shadow-2xs transition"
+            >
+              <RefreshCw size={13} />
+              <span>Refresh</span>
+            </button>
+          </div>
+
+          {historyLoading ? (
+            <div className="py-16 text-center">
+              <LoaderCircle className="h-6 w-6 animate-spin mx-auto text-primary mb-2" />
+              <p className="text-xs text-muted-foreground">Retrieving past analyses...</p>
+            </div>
+          ) : history.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-border bg-card p-12 text-center max-w-md mx-auto">
+              <div className="w-12 h-12 rounded-xl bg-muted text-muted-foreground flex items-center justify-center mx-auto mb-3">
+                <FolderOpen size={24} />
+              </div>
+              <h3 className="text-sm font-bold text-foreground">No Previous Analyses</h3>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Upload a satellite image using the "New Upload" tab to analyze and save networks.
+              </p>
+              <button
+                type="button"
+                onClick={() => setActiveTab("new")}
+                className="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground shadow-xs hover:bg-primary/90"
+              >
+                <Plus size={14} />
+                <span>Upload an image</span>
+              </button>
+            </div>
+          ) : (
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {history.map((item) => {
+                const thumb = item.artifacts?.original ?? item.input_image_ref;
+                const nodeCount = item.summary?.after_healing?.n_nodes ?? "—";
+                const edgeCount = item.summary?.after_healing?.n_edges ?? "—";
+                const compCount = item.summary?.after_healing?.n_components ?? "—";
+
+                return (
+                  <div
+                    key={item.analysis_id}
+                    onClick={() => reopenAnalysis(item)}
+                    className="group rounded-xl border border-border bg-card p-4 shadow-xs hover:border-teal-500/60 hover:shadow-sm transition cursor-pointer flex flex-col justify-between"
+                  >
+                    <div>
+                      {/* Image Thumbnail */}
+                      <div className="relative aspect-video w-full rounded-lg bg-[#0a0d12] overflow-hidden mb-3 border border-border">
+                        {thumb ? (
+                          <img
+                            src={thumb}
+                            alt={item.input_image_name ?? "Satellite preview"}
+                            className="h-full w-full object-cover group-hover:scale-105 transition duration-300 satellite-imagery"
+                            style={{ filter: "none" }}
+                            loading="lazy"
+                          />
+                        ) : (
+                          <div className="h-full w-full flex items-center justify-center text-muted-foreground font-mono text-xs">
+                            <Layers size={24} />
+                          </div>
+                        )}
+                        <span className="absolute top-2 left-2 rounded-md bg-slate-900/85 backdrop-blur-xs px-2 py-0.5 text-[0.62rem] font-mono font-medium text-white border border-slate-700/50">
+                          #{item.analysis_id.slice(0, 8)}
+                        </span>
+                        <span className="absolute top-2 right-2 rounded-md bg-teal-600/90 px-2 py-0.5 text-[0.62rem] font-semibold text-white">
+                          Completed
+                        </span>
+                      </div>
+
+                      {/* Title & Date */}
+                      <h3 className="font-semibold text-sm text-foreground truncate group-hover:text-teal-600 dark:group-hover:text-teal-400 transition">
+                        {item.input_image_name ?? `Analysis #${item.analysis_id.slice(0, 8)}`}
+                      </h3>
+                      <p className="mt-1 text-xs text-muted-foreground flex items-center gap-1.5">
+                        <Clock size={12} />
+                        <span>{formatDate(item.created_at)}</span>
+                      </p>
+
+                      {/* Metrics summary */}
+                      <div className="mt-3 grid grid-cols-3 gap-1.5 text-center text-xs">
+                        <div className="rounded-lg bg-muted/40 p-1.5 border border-border">
+                          <span className="block text-[0.58rem] font-semibold text-muted-foreground uppercase">
+                            Nodes
+                          </span>
+                          <span className="font-bold text-foreground font-mono">{nodeCount}</span>
+                        </div>
+                        <div className="rounded-lg bg-muted/40 p-1.5 border border-border">
+                          <span className="block text-[0.58rem] font-semibold text-muted-foreground uppercase">
+                            Roads
+                          </span>
+                          <span className="font-bold text-foreground font-mono">{edgeCount}</span>
+                        </div>
+                        <div className="rounded-lg bg-muted/40 p-1.5 border border-border">
+                          <span className="block text-[0.58rem] font-semibold text-muted-foreground uppercase">
+                            Zones
+                          </span>
+                          <span className="font-bold text-foreground font-mono">{compCount}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Card Footer CTA */}
+                    <div className="mt-4 pt-3 border-t border-border flex items-center justify-between text-xs font-semibold text-teal-600 dark:text-teal-400">
+                      <span>Open Network Workspace</span>
+                      <ArrowRight
+                        size={14}
+                        className="group-hover:translate-x-1 transition-transform"
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      )}
     </main>
   );
 }

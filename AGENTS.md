@@ -1,10 +1,7 @@
-<!-- LOVABLE:BEGIN -->
+# Route Resilience Development Guidelines
+
 > [!IMPORTANT]
-> This project is connected to [Lovable](https://lovable.dev). Avoid rewriting
-> published git history — force pushing, or rebasing/amending/squashing commits
-> that are already pushed — as it rewrites history on Lovable's side and the
-> user will likely lose their project history.
->
-> Commits you push to the connected branch sync back to Lovable and show up in
-> the editor, so keep the branch in a working state.
-<!-- LOVABLE:END -->
+> - **Preserve Git History**: Avoid rewriting published history — never force push, rebase, or squash commits that have already been published.
+> - **Clean Architecture**: Maintain strict separation between `backend/` (FastAPI, PyTorch, graph extraction, disruption/routing) and `frontend/` (React, TanStack Router).
+> - **Data & Weights Safety**: Never commit large model weights (`*.pth`), raw imagery (`RouteResilience/images_png/`), or generated analysis output runs (`outputs/`, `backend/outputs/`).
+> - **Verification Mandate**: Run pytest suites and frontend builds (`npm run build`) before delivering changes.

@@ -31,6 +31,7 @@ __pycache__/
 # Generated experiment outputs
 # ==============================
 outputs/
+backend/outputs/
 
 # ==============================
 # Frontend dependencies/build artifacts
