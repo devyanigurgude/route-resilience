@@ -13,17 +13,30 @@ import {
   Plus,
   RefreshCw,
   Sparkles,
+  Trash2,
   UploadCloud,
 } from "lucide-react";
 import { ChangeEvent, DragEvent, useEffect, useRef, useState } from "react";
 
 import {
   API_BASE,
+  deleteAnalysis,
   getAnalyses,
   saveAnalysisToHistory,
   SAVED_ANALYSIS_KEY,
   type AnalysisItem,
 } from "@/lib/backend";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { cn } from "@/lib/utils";
 
 type AnalysisPhase = "idle" | "processing" | "success" | "error";
 
@@ -146,6 +159,57 @@ function ExplorePage() {
   const [historyLoading, setHistoryLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<"new" | "history">("new");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [itemToDelete, setItemToDelete] = useState<AnalysisItem | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [actionFeedback, setActionFeedback] = useState<{
+    type: "success" | "error";
+    message: string;
+  } | null>(null);
+
+  const promptDelete = (e: React.MouseEvent, item: AnalysisItem) => {
+    e.stopPropagation();
+    if (item.status === "processing" || item.status === "running") {
+      setActionFeedback({
+        type: "error",
+        message: "Cannot delete an analysis while it is still running.",
+      });
+      return;
+    }
+    setItemToDelete(item);
+  };
+
+  const confirmDelete = async () => {
+    if (!itemToDelete) return;
+    setIsDeleting(true);
+    setActionFeedback(null);
+    try {
+      await deleteAnalysis(itemToDelete.analysis_id);
+      setHistory((prev) => prev.filter((it) => it.analysis_id !== itemToDelete.analysis_id));
+      if (
+        typeof window !== "undefined" &&
+        window.localStorage.getItem(SAVED_ANALYSIS_KEY) === itemToDelete.analysis_id
+      ) {
+        window.localStorage.removeItem(SAVED_ANALYSIS_KEY);
+        if (analysis.result?.analysis_id === itemToDelete.analysis_id) {
+          setAnalysis({ phase: "idle" });
+        }
+      }
+      const label = itemToDelete.input_image_name ?? `#${itemToDelete.analysis_id.slice(0, 8)}`;
+      setActionFeedback({
+        type: "success",
+        message: `Analysis ${label} was deleted successfully.`,
+      });
+      setItemToDelete(null);
+    } catch (err) {
+      setActionFeedback({
+        type: "error",
+        message: err instanceof Error ? err.message : "Failed to delete analysis.",
+      });
+    } finally {
+      setIsDeleting(false);
+    }
+  };
 
   // Load history from backend & local storage
   const loadHistory = async () => {
@@ -644,6 +708,34 @@ function ExplorePage() {
             </button>
           </div>
 
+          {actionFeedback && (
+            <div
+              className={cn(
+                "mb-4 flex items-center justify-between rounded-lg p-3 text-xs border shadow-2xs transition",
+                actionFeedback.type === "success"
+                  ? "bg-teal-500/10 text-teal-300 border-teal-500/30"
+                  : "bg-destructive/10 text-destructive border-destructive/30",
+              )}
+            >
+              <div className="flex items-center gap-2">
+                {actionFeedback.type === "success" ? (
+                  <CheckCircle2 size={14} className="text-teal-400 shrink-0" />
+                ) : (
+                  <AlertCircle size={14} className="text-destructive shrink-0" />
+                )}
+                <span>{actionFeedback.message}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActionFeedback(null)}
+                className="text-xs opacity-70 hover:opacity-100 px-1 py-0.5 rounded cursor-pointer"
+                aria-label="Dismiss message"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
           {historyLoading ? (
             <div className="py-16 text-center">
               <LoaderCircle className="h-6 w-6 animate-spin mx-auto text-primary mb-2" />
@@ -700,9 +792,20 @@ function ExplorePage() {
                         <span className="absolute top-2 left-2 rounded-md bg-slate-900/85 backdrop-blur-xs px-2 py-0.5 text-[0.62rem] font-mono font-medium text-white border border-slate-700/50">
                           #{item.analysis_id.slice(0, 8)}
                         </span>
-                        <span className="absolute top-2 right-2 rounded-md bg-teal-600/90 px-2 py-0.5 text-[0.62rem] font-semibold text-white">
-                          Completed
-                        </span>
+                        <div className="absolute top-2 right-2 flex items-center gap-1.5 z-10">
+                          <span className="rounded-md bg-teal-600/90 px-2 py-0.5 text-[0.62rem] font-semibold text-white">
+                            Completed
+                          </span>
+                          <button
+                            type="button"
+                            aria-label={`Delete analysis ${item.input_image_name ?? item.analysis_id.slice(0, 8)}`}
+                            title="Delete Analysis"
+                            onClick={(e) => promptDelete(e, item)}
+                            className="rounded-md bg-slate-900/85 hover:bg-rose-600 text-slate-300 hover:text-white p-1 backdrop-blur-xs transition border border-slate-700/50 shadow-xs cursor-pointer"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
                       </div>
 
                       {/* Title & Date */}
@@ -752,6 +855,44 @@ function ExplorePage() {
           )}
         </section>
       )}
+
+      {/* Delete Confirmation Alert Dialog */}
+      <AlertDialog
+        open={itemToDelete !== null}
+        onOpenChange={(open) => !open && !isDeleting && setItemToDelete(null)}
+      >
+        <AlertDialogContent className="bg-card border-border text-foreground">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-foreground">Delete Analysis?</AlertDialogTitle>
+            <AlertDialogDescription className="text-muted-foreground">
+              Are you sure you want to permanently delete analysis{" "}
+              <strong className="text-foreground">
+                {itemToDelete?.input_image_name ?? `#${itemToDelete?.analysis_id.slice(0, 8)}`}
+              </strong>{" "}
+              <span className="font-mono text-xs opacity-80">({itemToDelete?.analysis_id})</span>?
+              This will remove its extracted network, visual artifacts, and disruption results from storage.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              disabled={isDeleting}
+              className="bg-muted text-foreground border-border hover:bg-muted/80"
+            >
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={isDeleting}
+              onClick={(e) => {
+                e.preventDefault();
+                void confirmDelete();
+              }}
+              className="bg-rose-600 text-white hover:bg-rose-700 font-semibold"
+            >
+              {isDeleting ? "Deleting..." : "Delete Analysis"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </main>
   );
 }

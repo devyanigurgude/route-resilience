@@ -634,3 +634,57 @@ def test_criticality_endpoint_persists_real_report(tmp_path):
     assert (analysis_dir / "critical_roads.png").exists()
     with Image.open(analysis_dir / "critical_roads.png") as critical_roads:
         assert critical_roads.getpixel((5, 10)) == (255, 64, 64)
+
+
+def test_delete_analysis_success(tmp_path):
+    analysis_root = tmp_path / "analysis"
+    analysis_dir = analysis_root / "analysis-to-delete"
+    analysis_dir.mkdir(parents=True)
+    (analysis_dir / "original.png").write_bytes(b"dummy image data")
+    (analysis_dir / "summary.json").write_text(json.dumps({"test": True}), encoding="utf-8")
+
+    os.environ["ROUTE_RESILIENCE_ANALYSIS_DIR"] = str(analysis_root)
+    client = TestClient(api_server.create_app())
+
+    resp = client.delete("/api/analysis/analysis-to-delete")
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["status"] == "deleted"
+    assert payload["analysis_id"] == "analysis-to-delete"
+    assert not analysis_dir.exists()
+
+
+def test_delete_analysis_not_found(tmp_path):
+    os.environ["ROUTE_RESILIENCE_ANALYSIS_DIR"] = str(tmp_path / "analysis")
+    client = TestClient(api_server.create_app())
+
+    resp = client.delete("/api/analysis/nonexistent-id-12345")
+    assert resp.status_code == 404
+    assert "was not found" in resp.json()["detail"]
+
+
+def test_delete_analysis_invalid_id(tmp_path):
+    os.environ["ROUTE_RESILIENCE_ANALYSIS_DIR"] = str(tmp_path / "analysis")
+    client = TestClient(api_server.create_app())
+
+    resp = client.delete("/api/analysis/..")
+    assert resp.status_code in {400, 404, 405}
+
+
+def test_delete_analysis_active_conflict(tmp_path):
+    analysis_root = tmp_path / "analysis"
+    analysis_dir = analysis_root / "active-analysis-1"
+    analysis_dir.mkdir(parents=True)
+    (analysis_dir / "original.png").write_bytes(b"dummy")
+
+    os.environ["ROUTE_RESILIENCE_ANALYSIS_DIR"] = str(analysis_root)
+    api_server.ACTIVE_ANALYSES.add("active-analysis-1")
+    try:
+        client = TestClient(api_server.create_app())
+        resp = client.delete("/api/analysis/active-analysis-1")
+        assert resp.status_code == 409
+        assert "actively processing" in resp.json()["detail"]
+        assert analysis_dir.exists()
+    finally:
+        api_server.ACTIVE_ANALYSES.discard("active-analysis-1")
+

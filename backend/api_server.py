@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import sys
 import uuid
 from dataclasses import asdict
@@ -14,6 +15,8 @@ if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 from threading import Lock
 from typing import Any, Dict
+
+ACTIVE_ANALYSES: set[str] = set()
 
 from pydantic import BaseModel, Field
 import numpy as np
@@ -447,30 +450,34 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         analysis_id = uuid.uuid4().hex
-        analysis_dir = _analysis_root() / analysis_id
-        analysis_dir.mkdir(parents=True, exist_ok=True)
-
-        original_path = analysis_dir / "original.png"
-        original_img = Image.fromarray(np.asarray(normalized_rgb, dtype=np.uint8)).convert("RGB")
-        original_img.save(original_path)
-
-        context = _get_model_context()
-        model = context["model"]
-        device = context["device"]
-        threshold = context["threshold"]
-
+        ACTIVE_ANALYSES.add(analysis_id)
         try:
-            probability_map = predict_probability_map(model, normalized_rgb, device)
-            result = graph_from_probability_map(
-                probability_map, threshold, context["config"].graph, normalized_rgb
-            )
-            save_artifacts(result, normalized_rgb, analysis_dir)
-            _persist_criticality_artifacts(analysis_dir, result["graph_after"])
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Inference failed: {exc}") from exc
+            analysis_dir = _analysis_root() / analysis_id
+            analysis_dir.mkdir(parents=True, exist_ok=True)
 
-        artifact_map = _build_artifact_map(str(request.base_url), analysis_dir)
-        summary = json.loads((analysis_dir / "summary.json").read_text(encoding="utf-8"))
+            original_path = analysis_dir / "original.png"
+            original_img = Image.fromarray(np.asarray(normalized_rgb, dtype=np.uint8)).convert("RGB")
+            original_img.save(original_path)
+
+            context = _get_model_context()
+            model = context["model"]
+            device = context["device"]
+            threshold = context["threshold"]
+
+            try:
+                probability_map = predict_probability_map(model, normalized_rgb, device)
+                result = graph_from_probability_map(
+                    probability_map, threshold, context["config"].graph, normalized_rgb
+                )
+                save_artifacts(result, normalized_rgb, analysis_dir)
+                _persist_criticality_artifacts(analysis_dir, result["graph_after"])
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Inference failed: {exc}") from exc
+
+            artifact_map = _build_artifact_map(str(request.base_url), analysis_dir)
+            summary = json.loads((analysis_dir / "summary.json").read_text(encoding="utf-8"))
+        finally:
+            ACTIVE_ANALYSES.discard(analysis_id)
 
         manifest = {
             "analysis_id": analysis_id,
@@ -555,6 +562,48 @@ def create_app() -> FastAPI:
             "artifacts": _build_artifact_map(str("http://localhost:8000"), analysis_dir),
             "summary": summary,
             "threshold_used": summary.get("threshold"),
+        }
+
+    @app.delete("/api/analysis/{analysis_id}")
+    async def delete_analysis(analysis_id: str) -> Dict[str, Any]:
+        if not analysis_id or "/" in analysis_id or "\\" in analysis_id or ".." in analysis_id:
+            raise HTTPException(status_code=400, detail="Invalid analysis ID.")
+
+        root = _analysis_root().resolve()
+        analysis_dir = (_analysis_root() / analysis_id).resolve()
+        if not analysis_dir.is_relative_to(root):
+            raise HTTPException(status_code=400, detail="Invalid analysis ID.")
+
+        if analysis_id in ACTIVE_ANALYSES:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot delete analysis '{analysis_id}' while it is actively processing.",
+            )
+
+        if not analysis_dir.exists() or not analysis_dir.is_dir():
+            raise HTTPException(status_code=404, detail=f"Analysis '{analysis_id}' was not found.")
+
+        manifest_path = _analysis_metadata_file(analysis_dir)
+        if manifest_path.exists():
+            try:
+                manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if manifest_data.get("status") in {"processing", "running", "in_progress"}:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Cannot delete analysis '{analysis_id}' while it is still running.",
+                    )
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        try:
+            shutil.rmtree(analysis_dir)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to delete analysis data: {exc}") from exc
+
+        return {
+            "status": "deleted",
+            "analysis_id": analysis_id,
+            "message": f"Analysis '{analysis_id}' and all associated files deleted successfully.",
         }
 
     @app.get("/api/analysis/{analysis_id}/criticality")

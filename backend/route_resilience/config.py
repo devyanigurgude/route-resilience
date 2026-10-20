@@ -28,6 +28,7 @@ class DataConfig:
     use_occlusion_augmentation: bool = True
     occlusion_max_holes: int = 6
     occlusion_max_frac: float = 0.15  # max fraction of tile edge length per hole
+    occlusion_aug_type: str = "coarse_dropout"  # "coarse_dropout" | "multi_type"
 
 
 @dataclass

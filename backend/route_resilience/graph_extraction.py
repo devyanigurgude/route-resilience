@@ -247,6 +247,7 @@ def confidence_gated_gap_healing(
     occlusion_heading_threshold: float = 0.75,
     max_lateral_offset_px: float = 4.0,
     occlusion_mask: Optional[np.ndarray] = None,
+    cloud_mask: Optional[np.ndarray] = None,
     enable_cloud_occlusion_recovery: bool = False,
     max_cloud_occlusion_gap_px: float = 240.0,
     cloud_heading_threshold: float = 0.78,
@@ -300,8 +301,14 @@ def confidence_gated_gap_healing(
         occlusion_mask = np.asarray(occlusion_mask, dtype=bool)
         if occlusion_mask.shape != prob_map.shape:
             raise ValueError("occlusion_mask must have the same shape as prob_map")
+    if cloud_mask is not None:
+        cloud_mask = np.asarray(cloud_mask, dtype=bool)
+        if cloud_mask.shape != prob_map.shape:
+            raise ValueError("cloud_mask must have the same shape as prob_map")
+    effective_cloud_mask = cloud_mask if cloud_mask is not None else occlusion_mask
+
     search_dist_limit = max_occlusion_gap_px if enable_occlusion_recovery else max_gap_px
-    if enable_cloud_occlusion_recovery and occlusion_mask is not None:
+    if enable_cloud_occlusion_recovery and effective_cloud_mask is not None:
         search_dist_limit = max(search_dist_limit, max_cloud_occlusion_gap_px)
 
     candidates = []
@@ -376,7 +383,7 @@ def confidence_gated_gap_healing(
             is_cloud_candidate = False
             if (
                 enable_cloud_occlusion_recovery
-                and occlusion_mask is not None
+                and effective_cloud_mask is not None
                 and max_gap_px < dist <= max_cloud_occlusion_gap_px
                 and dot_a >= cloud_heading_threshold
                 and dot_b >= cloud_heading_threshold
@@ -402,7 +409,7 @@ def confidence_gated_gap_healing(
                     )
                     cloud_length = _polyline_length(cloud_path)
                     cloud_sinuosity = cloud_length / max(1e-3, dist)
-                    cloud_coverage = _mask_coverage(occlusion_mask, cloud_path)
+                    cloud_coverage = _mask_coverage(effective_cloud_mask, cloud_path)
                     is_cloud_candidate = (
                         cloud_sinuosity <= cloud_max_sinuosity
                         and cloud_coverage >= cloud_min_coverage
@@ -641,6 +648,9 @@ def confidence_gated_gap_healing(
                 end_pos=positions[b],
                 max_path_length=search_max_len,
             )
+            if (recovered_path is None or len(recovered_path) < 2) and is_occ and occlusion_mask is not None:
+                recovered_path = line
+
             if recovered_path is not None and len(recovered_path) >= 2:
                 diffs = np.diff(recovered_path, axis=0)
                 path_length = float(np.sum(np.sqrt(np.sum(diffs ** 2, axis=1))))
@@ -680,6 +690,10 @@ def confidence_gated_gap_healing(
                     p_flank = 0.5 * float(prob_map[l_rows, l_cols].mean() + prob_map[r_rows, r_cols].mean())
                     p_contrast = p_evidence - p_flank
 
+                occ_coverage = 0.0
+                if occlusion_mask is not None:
+                    occ_coverage = float(_mask_coverage(occlusion_mask, recovered_path))
+
                 # Standard A* recovery: high evidence throughout
                 standard_a_star_ok = (
                     dist <= max_gap_px
@@ -699,19 +713,45 @@ def confidence_gated_gap_healing(
                     and (min_flank_contrast is None or p_contrast >= -0.05)
                 )
 
-                if standard_a_star_ok or occlusion_recovery_ok:
+                # Narrow exception for fully hidden spans under verified photometric occlusion:
+                # When dense canopy or deep shadow zeroes out the U-Net probability, allow bridging
+                # ONLY IF:
+                # 1. Endpoints strictly qualify as an occlusion candidate (is_occ=True, degree=1, collinear)
+                # 2. Both endpoints have strict heading alignment (dot_a, dot_b >= occlusion_heading_threshold)
+                # 3. Path is nearly straight (sinuosity <= 1.20)
+                # 4. Verified physical occlusion coverage along path >= 50%
+                occlusion_mask_recovery_ok = (
+                    enable_occlusion_recovery
+                    and is_occ
+                    and dist <= max_occlusion_gap_px
+                    and dot_a >= occlusion_heading_threshold
+                    and dot_b >= occlusion_heading_threshold
+                    and mutual_heading >= 0.60
+                    and sinuosity <= 1.20
+                    and occ_coverage >= 0.50
+                )
+
+                if standard_a_star_ok or occlusion_recovery_ok or occlusion_mask_recovery_ok:
                     is_occ_recovered = True
-                    recovery_type = "occlusion_continuity" if occlusion_recovery_ok else "evidence_guided"
+                    recovery_type = (
+                        "occlusion_continuity"
+                        if (occlusion_recovery_ok or occlusion_mask_recovery_ok)
+                        else "evidence_guided"
+                    )
                     acceptance_reason = (
-                        "Accepted via Occlusion-Aware Collinear Continuity: strong collinear endpoint alignment justifies bridging across low-confidence occlusion span."
-                        if occlusion_recovery_ok
-                        else "Accepted via Evidence-Guided Path Search: continuous high-probability corridor discovered."
+                        "Accepted via Verified Occlusion Continuity: collinear endpoints bridged across verified photometric occlusion (coverage >= 50%)."
+                        if (occlusion_mask_recovery_ok and not occlusion_recovery_ok)
+                        else (
+                            "Accepted via Occlusion-Aware Collinear Continuity: strong collinear endpoint alignment justifies bridging across low-confidence occlusion span."
+                            if occlusion_recovery_ok
+                            else "Accepted via Evidence-Guided Path Search: continuous high-probability corridor discovered."
+                        )
                     )
                     checks = [
                         {
                             "name": "Gap Distance",
                             "passed": True,
-                            "detail": f"{dist:.1f} px <= {max_occlusion_gap_px if occlusion_recovery_ok else max_gap_px:.1f} px",
+                            "detail": f"{dist:.1f} px <= {max_occlusion_gap_px if (occlusion_recovery_ok or occlusion_mask_recovery_ok) else max_gap_px:.1f} px",
                         },
                         {
                             "name": "Endpoint Heading Alignment",
@@ -723,22 +763,31 @@ def confidence_gated_gap_healing(
                             "passed": True,
                             "detail": f"{lat_offset:.1f} px <= {max_lateral_offset_px:.1f} px",
                         },
-                        {
+                    ]
+                    if occlusion_mask_recovery_ok and not occlusion_recovery_ok:
+                        checks.append({
+                            "name": "Photometric Occlusion Coverage",
+                            "passed": True,
+                            "detail": f"{occ_coverage:.1%} >= 50.0% (bridges zero-evidence span under verified shadow/canopy/cloud)",
+                        })
+                    else:
+                        checks.append({
                             "name": "Probability Evidence",
                             "passed": True,
                             "detail": f"{p_evidence:.3f} >= {min_occlusion_confidence if occlusion_recovery_ok else min_gap_confidence:.3f}",
-                        },
+                        })
+                    checks.extend([
                         {
                             "name": "Path Sinuosity Guard",
                             "passed": True,
-                            "detail": f"{sinuosity:.2f} <= {1.25 if occlusion_recovery_ok else max_sinuosity:.2f}",
+                            "detail": f"{sinuosity:.2f} <= {1.25 if (occlusion_recovery_ok or occlusion_mask_recovery_ok) else max_sinuosity:.2f}",
                         },
-                    ]
+                    ])
                     if min_flank_contrast is not None:
                         checks.append({
                             "name": "Flank Contrast",
                             "passed": True,
-                            "detail": f"{p_contrast:.3f} >= {'-0.05' if occlusion_recovery_ok else str(min_flank_contrast)}",
+                            "detail": f"{p_contrast:.3f} >= {'-0.05' if (occlusion_recovery_ok or occlusion_mask_recovery_ok) else str(min_flank_contrast)}",
                         })
                     checks.append({
                         "name": "Acyclicity & Degree",
@@ -757,6 +806,7 @@ def confidence_gated_gap_healing(
                         "supported_fraction": round(float(p_supported_fraction), 3),
                         "flank_contrast": round(float(p_contrast), 3) if min_flank_contrast is not None else None,
                         "sinuosity": round(float(sinuosity), 3),
+                        "occlusion_coverage": round(float(occ_coverage), 3) if occlusion_mask is not None else None,
                         "acceptance_reason": acceptance_reason,
                         "checks": checks,
                     }
@@ -768,7 +818,9 @@ def confidence_gated_gap_healing(
                         healed=True,
                         occlusion_recovered=is_occ_recovered,
                         inferred=True,
-                        occlusion_suspected=bool(occlusion_recovery_ok),
+                        occlusion_suspected=bool(occlusion_recovery_ok or occlusion_mask_recovery_ok),
+                        occlusion_kind="photometric_occlusion" if (occlusion_mask_recovery_ok and not occlusion_recovery_ok) else ("occlusion" if occlusion_recovery_ok else None),
+                        occlusion_coverage=float(occ_coverage) if occlusion_mask is not None else 0.0,
                         recovery_type=recovery_type,
                         pts=recovered_path,
                         evidence=evidence_data,
@@ -795,10 +847,10 @@ def confidence_gated_gap_healing(
                         reasons.append(f"Gap distance ({dist:.1f} px) exceeds limit")
 
                     min_ev = min_occlusion_confidence if is_occ else min_gap_confidence
-                    ev_ok = (p_evidence >= min_ev)
-                    checks.append({"name": "Probability Evidence", "passed": ev_ok, "detail": f"{p_evidence:.3f} (threshold: {min_ev:.3f})"})
+                    ev_ok = (p_evidence >= min_ev) or (is_occ and occ_coverage >= 0.50)
+                    checks.append({"name": "Probability Evidence", "passed": ev_ok, "detail": f"{p_evidence:.3f} (threshold: {min_ev:.3f}, occlusion_coverage={occ_coverage:.1%})"})
                     if not ev_ok:
-                        reasons.append(f"Probability evidence ({p_evidence:.3f}) below threshold ({min_ev:.3f})")
+                        reasons.append(f"Probability evidence ({p_evidence:.3f}) below threshold ({min_ev:.3f}) without occlusion mask support")
 
                     if not is_occ:
                         frac_ok = (p_supported_fraction >= 0.7)

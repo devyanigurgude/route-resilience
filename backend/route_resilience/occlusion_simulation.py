@@ -99,6 +99,8 @@ def generate_road_centered_occlusions(
         fill_color = np.array([38, 42, 46], dtype=np.uint8)
     elif fill_mode == "canopy":
         fill_color = np.array([45, 68, 38], dtype=np.uint8)
+    elif fill_mode == "cloud":
+        fill_color = np.array([232, 236, 240], dtype=np.uint8)
     elif fill_mode == "black":
         fill_color = np.array([0, 0, 0], dtype=np.uint8)
     elif fill_mode == "mean":
@@ -125,11 +127,11 @@ def generate_road_centered_occlusions(
             occlusion_mask[r0:r1, c0:c1] = True
             records.append({"type": pattern, "center": (ar, ac), "bbox": (r0, c0, r1, c1)})
 
-        elif pattern == "irregular_patch":
+        elif pattern in ("irregular_patch", "procedural_cloud", "canopy_cluster"):
             # Organic patch constructed by multiple dilated disks
             patch = np.zeros((H, W), dtype=bool)
-            num_subparts = int(rng.integers(3, 6))
-            radius = max(3, sz // 3)
+            num_subparts = int(rng.integers(4, 7)) if pattern == "procedural_cloud" else int(rng.integers(3, 6))
+            radius = max(4, sz // 2) if pattern == "procedural_cloud" else max(3, sz // 3)
             for _ in range(num_subparts):
                 dr = int(rng.integers(-radius, radius + 1))
                 dc = int(rng.integers(-radius, radius + 1))
@@ -137,6 +139,10 @@ def generate_road_centered_occlusions(
                 patch[cr, cc] = True
             dilated = binary_dilation(patch, structure=disk(radius))
             occlusion_mask |= dilated
+            if pattern == "procedural_cloud" and fill_mode != "black":
+                fill_color = np.array([232, 236, 240], dtype=np.uint8)
+            elif pattern == "canopy_cluster" and fill_mode != "black":
+                fill_color = np.array([45, 68, 38], dtype=np.uint8)
             records.append({"type": pattern, "center": (ar, ac), "radius": radius})
 
         elif pattern == "linear_transverse":

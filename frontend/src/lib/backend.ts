@@ -428,6 +428,32 @@ export function getAnalysis<T>(analysisId: string, signal?: AbortSignal) {
   );
 }
 
+export async function deleteAnalysis(
+  analysisId: string,
+): Promise<{ status: string; analysis_id: string; message: string }> {
+  const result = await request<{ status: string; analysis_id: string; message: string }>(
+    `/api/analysis/${encodeURIComponent(analysisId)}`,
+    {
+      method: "DELETE",
+    },
+  );
+  removeAnalysisFromHistory(analysisId);
+  return result;
+}
+
+export function removeAnalysisFromHistory(analysisId: string) {
+  if (typeof window === "undefined" || !analysisId) return;
+  try {
+    const raw = window.localStorage.getItem(ANALYSES_HISTORY_KEY);
+    if (!raw) return;
+    const existing: AnalysisItem[] = JSON.parse(raw);
+    const filtered = existing.filter((a) => a.analysis_id !== analysisId);
+    window.localStorage.setItem(ANALYSES_HISTORY_KEY, JSON.stringify(filtered));
+  } catch {
+    // Ignore localStorage errors
+  }
+}
+
 export function getCriticality<T>(analysisId: string, signal?: AbortSignal) {
   return request<T>(
     `/api/analysis/${encodeURIComponent(analysisId)}/criticality`,

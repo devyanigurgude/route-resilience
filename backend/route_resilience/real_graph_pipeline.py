@@ -179,6 +179,48 @@ def cloud_occlusion_mask(rgb_image: np.ndarray) -> np.ndarray:
     return core | (dilated_core & halo)
 
 
+def shadow_occlusion_mask(rgb_image: np.ndarray) -> np.ndarray:
+    """Detect deep shadow candidate regions in an RGB satellite image.
+
+    Conservative spatial gate for occlusion-aware continuity.
+    Identifies dark regions where luminance and all RGB channels are low.
+    """
+    if rgb_image is None:
+        return None
+    rgb = np.asarray(rgb_image, dtype=np.float32) / 255.0
+    if rgb.ndim != 3 or rgb.shape[2] != 3:
+        raise ValueError(f"Expected an HxWx3 RGB image, got shape {rgb.shape}")
+    luminance = 0.2126 * rgb[..., 0] + 0.7152 * rgb[..., 1] + 0.0722 * rgb[..., 2]
+    channel_max = rgb.max(axis=2)
+    return (luminance <= 0.16) & (channel_max <= 0.22)
+
+
+def canopy_occlusion_mask(rgb_image: np.ndarray) -> np.ndarray:
+    """Detect dense tree canopy vegetation candidate regions in an RGB satellite image.
+
+    Conservative spatial gate for occlusion-aware continuity.
+    Uses Excess Green Index (ExG = 2G - R - B) and green-dominance.
+    """
+    if rgb_image is None:
+        return None
+    rgb = np.asarray(rgb_image, dtype=np.float32) / 255.0
+    if rgb.ndim != 3 or rgb.shape[2] != 3:
+        raise ValueError(f"Expected an HxWx3 RGB image, got shape {rgb.shape}")
+    r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+    exg = 2.0 * g - r - b
+    return (exg >= 0.08) & (g > r * 1.08) & (g > b * 1.05) & (g <= 0.70)
+
+
+def photometric_occlusion_mask(rgb_image: np.ndarray) -> np.ndarray:
+    """Combines conservative cloud, shadow, and tree canopy candidate masks."""
+    if rgb_image is None:
+        return None
+    cloud = cloud_occlusion_mask(rgb_image)
+    shadow = shadow_occlusion_mask(rgb_image)
+    canopy = canopy_occlusion_mask(rgb_image)
+    return cloud | shadow | canopy
+
+
 def graph_from_probability_map(
     probability_map, threshold: float, graph_cfg, rgb_image: np.ndarray | None = None
 ) -> Dict[str, Any]:
@@ -206,6 +248,7 @@ def graph_from_probability_map(
     )
     graph_before = attach_width(graph_before, binary_mask)
     cloud_mask = cloud_occlusion_mask(rgb_image) if rgb_image is not None else None
+    photometric_mask = photometric_occlusion_mask(rgb_image) if rgb_image is not None else None
     graph_after = confidence_gated_gap_healing(
         graph_before.copy(),
         probability_map,
@@ -223,7 +266,8 @@ def graph_from_probability_map(
         min_occlusion_confidence=getattr(graph_cfg, "min_occlusion_confidence", 0.05),
         occlusion_heading_threshold=getattr(graph_cfg, "occlusion_heading_threshold", 0.75),
         max_lateral_offset_px=getattr(graph_cfg, "max_lateral_offset_px", 4.0),
-        occlusion_mask=cloud_mask,
+        occlusion_mask=photometric_mask,
+        cloud_mask=cloud_mask,
         enable_cloud_occlusion_recovery=getattr(graph_cfg, "enable_cloud_occlusion_recovery", False),
         max_cloud_occlusion_gap_px=getattr(graph_cfg, "max_cloud_occlusion_gap_px", 240.0),
         cloud_heading_threshold=getattr(graph_cfg, "cloud_heading_threshold", 0.78),

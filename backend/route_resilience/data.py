@@ -44,13 +44,109 @@ def preprocess_rgb_image(image: np.ndarray | Image.Image) -> torch.Tensor:
     return torch.from_numpy(image).permute(2, 0, 1).to(dtype=torch.float32)
 
 
+class MultiTypeOcclusionAugmentation(A.ImageOnlyTransform):
+    """
+    Multi-type synthetic occlusion augmentation for training occlusion-robust models:
+      1. 'rectangular_dropout': Black rectangular patches (simulating sensor dropouts & buildings).
+      2. 'canopy_cluster': Textured foliage-green organic clusters (simulating natural tree canopy).
+      3. 'procedural_cloud': Bright, low-saturation organic patches with soft Gaussian alpha edges
+         and variable opacity (simulating clouds & haze).
+
+    IMPORTANT: Ground-truth road masks are NEVER modified because they represent
+    the true physical underlying road network beneath the occlusion.
+    """
+
+    def __init__(
+        self,
+        num_holes_range=(1, 4),
+        hole_size_range=(16, 36),
+        occlusion_types=("rectangular_dropout", "canopy_cluster", "procedural_cloud"),
+        type_weights=(0.34, 0.33, 0.33),
+        seed=None,
+        p=0.5,
+    ):
+        super().__init__(p=p)
+        self.num_holes_range = num_holes_range
+        self.hole_size_range = hole_size_range
+        self.occlusion_types = occlusion_types
+        self.type_weights = type_weights
+        self.rng = np.random.default_rng(seed)
+
+    def apply(self, img, **params):
+        import cv2
+
+        H, W, _ = img.shape
+        img_out = img.copy()
+
+        n_holes = int(self.rng.integers(self.num_holes_range[0], self.num_holes_range[1] + 1))
+        if n_holes <= 0:
+            return img_out
+
+        chosen_type = str(self.rng.choice(self.occlusion_types, p=self.type_weights))
+
+        for _ in range(n_holes):
+            sz = int(self.rng.integers(self.hole_size_range[0], self.hole_size_range[1] + 1))
+            cr = int(self.rng.integers(sz // 2, max(sz // 2 + 1, H - sz // 2)))
+            cc = int(self.rng.integers(sz // 2, max(sz // 2 + 1, W - sz // 2)))
+
+            if chosen_type == "rectangular_dropout":
+                half_h = sz // 2
+                half_w = int(self.rng.integers(self.hole_size_range[0], self.hole_size_range[1] + 1)) // 2
+                r0, r1 = max(0, cr - half_h), min(H, cr + half_h + 1)
+                c0, c1 = max(0, cc - half_w), min(W, cc + half_w + 1)
+                img_out[r0:r1, c0:c1] = 0
+
+            elif chosen_type == "canopy_cluster":
+                patch = np.zeros((H, W), dtype=bool)
+                num_sub = int(self.rng.integers(3, 6))
+                rad = max(3, sz // 3)
+                for _ in range(num_sub):
+                    dr = int(self.rng.integers(-rad, rad + 1))
+                    dc = int(self.rng.integers(-rad, rad + 1))
+                    pr = int(np.clip(cr + dr, 0, H - 1))
+                    pc = int(np.clip(cc + dc, 0, W - 1))
+                    patch[pr, pc] = True
+                dilated = cv2.dilate(patch.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (rad * 2 + 1, rad * 2 + 1))) > 0
+
+                base_color = np.array([45, 75, 38], dtype=np.float32)
+                texture_noise = self.rng.normal(0, 10.0, (H, W, 3))
+                foliage = np.clip(base_color + texture_noise, 0, 255).astype(np.uint8)
+                img_out[dilated] = foliage[dilated]
+
+            elif chosen_type == "procedural_cloud":
+                patch = np.zeros((H, W), dtype=np.float32)
+                num_sub = int(self.rng.integers(4, 7))
+                rad = max(4, sz // 2)
+                for _ in range(num_sub):
+                    dr = int(self.rng.integers(-rad, rad + 1))
+                    dc = int(self.rng.integers(-rad, rad + 1))
+                    pr = int(np.clip(cr + dr, 0, H - 1))
+                    pc = int(np.clip(cc + dc, 0, W - 1))
+                    patch[pr, pc] = 1.0
+
+                ksize = max(5, rad * 2 + 1) | 1
+                soft_mask = cv2.GaussianBlur(patch, (ksize, ksize), sigmaX=rad * 0.8)
+                if soft_mask.max() > 0:
+                    soft_mask = soft_mask / soft_mask.max()
+                opacity = float(self.rng.uniform(0.60, 0.95))
+                alpha = np.clip(soft_mask * opacity, 0.0, 1.0)[:, :, np.newaxis]
+
+                cloud_base = np.array([235, 238, 242], dtype=np.float32)
+                cloud_noise = self.rng.normal(0, 4.0, (H, W, 3))
+                cloud_rgb = np.clip(cloud_base + cloud_noise, 0, 255).astype(np.float32)
+
+                blended = alpha * cloud_rgb + (1.0 - alpha) * img_out.astype(np.float32)
+                img_out = np.clip(blended, 0, 255).astype(np.uint8)
+
+        return img_out
+
+
 def build_transforms(cfg):
     """
     One augmentation pipeline, shared by every model trained in a
     comparison run. `use_occlusion_augmentation` controls whether
-    CoarseDropout (a stand-in for cloud/canopy/shadow occlusion) is
-    included -- keep this ON for every model in an ablation unless the
-    experiment is specifically "with vs without occlusion aug".
+    occlusion augmentation is included. `occlusion_aug_type` chooses
+    between baseline 'coarse_dropout' and 'multi_type'.
     """
     if A is None:
         raise ImportError("pip install albumentations --break-system-packages")
@@ -63,21 +159,29 @@ def build_transforms(cfg):
     ]
 
     if cfg.use_occlusion_augmentation:
-        max_h = max(1, int(cfg.image_size * cfg.occlusion_max_frac))
-        max_w = max(1, int(cfg.image_size * cfg.occlusion_max_frac))
-        ops.append(
-            A.CoarseDropout(
-                # Albumentations >= 2.0 API. Integer ranges are pixel sizes.
-                num_holes_range=(1, cfg.occlusion_max_holes),
-                hole_height_range=(1, max_h),
-                hole_width_range=(1, max_w),
-                fill=0,   # blacks out the patch, standing in for cloud/shadow
-                fill_mask=None,  # IMPORTANT: leave the mask untouched --
-                # we want the model to learn to recover the *hidden* road,
-                # not to learn that occluded pixels mean "not a road"
-                p=0.5,
+        aug_type = getattr(cfg, "occlusion_aug_type", "coarse_dropout")
+        if aug_type == "multi_type":
+            max_sz = max(16, int(cfg.image_size * cfg.occlusion_max_frac))
+            ops.append(
+                MultiTypeOcclusionAugmentation(
+                    num_holes_range=(1, cfg.occlusion_max_holes),
+                    hole_size_range=(16, max_sz),
+                    p=0.5,
+                )
             )
-        )
+        else:
+            max_h = max(1, int(cfg.image_size * cfg.occlusion_max_frac))
+            max_w = max(1, int(cfg.image_size * cfg.occlusion_max_frac))
+            ops.append(
+                A.CoarseDropout(
+                    num_holes_range=(1, cfg.occlusion_max_holes),
+                    hole_height_range=(1, max_h),
+                    hole_width_range=(1, max_w),
+                    fill=0,
+                    fill_mask=None,
+                    p=0.5,
+                )
+            )
 
     return A.Compose(ops)
 
