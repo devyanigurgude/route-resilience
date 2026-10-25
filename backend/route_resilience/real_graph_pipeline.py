@@ -9,7 +9,7 @@ geographic distances or travel times.
 from dataclasses import asdict, replace
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
 
 import networkx as nx
 import numpy as np
@@ -179,7 +179,46 @@ def cloud_occlusion_mask(rgb_image: np.ndarray) -> np.ndarray:
     return core | (dilated_core & halo)
 
 
-def shadow_occlusion_mask(rgb_image: np.ndarray) -> np.ndarray:
+def dilate_mask(
+    mask: Optional[np.ndarray],
+    kernel_size: int = 3,
+    iterations: int = 1,
+) -> Optional[np.ndarray]:
+    """Applies morphological dilation with a square structuring element.
+
+    Preserves the source mask unchanged. If iterations == 0 or kernel_size == 1,
+    returns a copy of the original mask.
+
+    Parameters
+    ----------
+    mask : Optional[np.ndarray]
+        2D boolean array to dilate. If None, returns None.
+    kernel_size : int
+        Size of the square structuring element. Must be a positive odd integer (1, 3, 5, ...).
+    iterations : int
+        Number of dilation iterations. Must be non-negative.
+    """
+    if mask is None:
+        return None
+    if iterations < 0:
+        raise ValueError(f"Dilation iterations must be non-negative, got {iterations}")
+    if kernel_size < 1 or kernel_size % 2 == 0:
+        raise ValueError(f"Dilation kernel_size must be a positive odd integer, got {kernel_size}")
+    if iterations == 0 or kernel_size == 1:
+        return np.asarray(mask, dtype=bool).copy()
+
+    from scipy.ndimage import binary_dilation
+
+    mask_bool = np.asarray(mask, dtype=bool)
+    structure = np.ones((kernel_size, kernel_size), dtype=bool)
+    return binary_dilation(mask_bool, structure=structure, iterations=iterations)
+
+
+def shadow_occlusion_mask(
+    rgb_image: np.ndarray,
+    dilation_kernel_size: int = 3,
+    dilation_iterations: int = 0,
+) -> np.ndarray:
     """Detect deep shadow candidate regions in an RGB satellite image.
 
     Conservative spatial gate for occlusion-aware continuity.
@@ -192,10 +231,17 @@ def shadow_occlusion_mask(rgb_image: np.ndarray) -> np.ndarray:
         raise ValueError(f"Expected an HxWx3 RGB image, got shape {rgb.shape}")
     luminance = 0.2126 * rgb[..., 0] + 0.7152 * rgb[..., 1] + 0.0722 * rgb[..., 2]
     channel_max = rgb.max(axis=2)
-    return (luminance <= 0.16) & (channel_max <= 0.22)
+    base_mask = (luminance <= 0.16) & (channel_max <= 0.22)
+    if dilation_iterations > 0:
+        return dilate_mask(base_mask, kernel_size=dilation_kernel_size, iterations=dilation_iterations)
+    return base_mask
 
 
-def canopy_occlusion_mask(rgb_image: np.ndarray) -> np.ndarray:
+def canopy_occlusion_mask(
+    rgb_image: np.ndarray,
+    dilation_kernel_size: int = 3,
+    dilation_iterations: int = 0,
+) -> np.ndarray:
     """Detect dense tree canopy vegetation candidate regions in an RGB satellite image.
 
     Conservative spatial gate for occlusion-aware continuity.
@@ -208,16 +254,31 @@ def canopy_occlusion_mask(rgb_image: np.ndarray) -> np.ndarray:
         raise ValueError(f"Expected an HxWx3 RGB image, got shape {rgb.shape}")
     r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
     exg = 2.0 * g - r - b
-    return (exg >= 0.08) & (g > r * 1.08) & (g > b * 1.05) & (g <= 0.70)
+    base_mask = (exg >= 0.08) & (g > r * 1.08) & (g > b * 1.05) & (g <= 0.70)
+    if dilation_iterations > 0:
+        return dilate_mask(base_mask, kernel_size=dilation_kernel_size, iterations=dilation_iterations)
+    return base_mask
 
 
-def photometric_occlusion_mask(rgb_image: np.ndarray) -> np.ndarray:
+def photometric_occlusion_mask(
+    rgb_image: np.ndarray,
+    dilation_kernel_size: int = 3,
+    dilation_iterations: int = 0,
+) -> np.ndarray:
     """Combines conservative cloud, shadow, and tree canopy candidate masks."""
     if rgb_image is None:
         return None
     cloud = cloud_occlusion_mask(rgb_image)
-    shadow = shadow_occlusion_mask(rgb_image)
-    canopy = canopy_occlusion_mask(rgb_image)
+    shadow = shadow_occlusion_mask(
+        rgb_image,
+        dilation_kernel_size=dilation_kernel_size,
+        dilation_iterations=dilation_iterations,
+    )
+    canopy = canopy_occlusion_mask(
+        rgb_image,
+        dilation_kernel_size=dilation_kernel_size,
+        dilation_iterations=dilation_iterations,
+    )
     return cloud | shadow | canopy
 
 
@@ -247,8 +308,23 @@ def graph_from_probability_map(
         min_edge_length_px=graph_cfg.min_edge_length_px,
     )
     graph_before = attach_width(graph_before, binary_mask)
+
+    dilation_kernel_size = getattr(graph_cfg, "mask_dilation_kernel_size", 3)
+    dilation_iters = (
+        getattr(graph_cfg, "mask_dilation_iterations", 1)
+        if getattr(graph_cfg, "enable_mask_dilation", False)
+        else 0
+    )
     cloud_mask = cloud_occlusion_mask(rgb_image) if rgb_image is not None else None
-    photometric_mask = photometric_occlusion_mask(rgb_image) if rgb_image is not None else None
+    photometric_mask = (
+        photometric_occlusion_mask(
+            rgb_image,
+            dilation_kernel_size=dilation_kernel_size,
+            dilation_iterations=dilation_iters,
+        )
+        if rgb_image is not None
+        else None
+    )
     graph_after = confidence_gated_gap_healing(
         graph_before.copy(),
         probability_map,

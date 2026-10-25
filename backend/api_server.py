@@ -14,7 +14,7 @@ _backend_dir = str(Path(__file__).resolve().parent)
 if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 from threading import Lock
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional, Tuple
 
 ACTIVE_ANALYSES: set[str] = set()
 
@@ -409,6 +409,50 @@ class RecoveryRequest(BaseModel):
     )
 
 
+class BulkDeleteRequest(BaseModel):
+    analysis_ids: list[str] = Field(
+        default_factory=list,
+        description="List of specific analysis IDs to delete.",
+    )
+    delete_all: bool = Field(
+        default=False,
+        description="Whether to delete all stored analyses.",
+    )
+
+
+def _safe_delete_analysis_dir(analysis_id: str, root: Path) -> tuple[bool, int, str]:
+    """Safely validate and remove a specific analysis directory.
+    Returns (success: bool, status_code: int, error_message: str).
+    """
+    if not analysis_id or "/" in analysis_id or "\\" in analysis_id or ".." in analysis_id:
+        return False, 400, "Invalid analysis ID."
+
+    analysis_dir = (root / analysis_id).resolve()
+    if not analysis_dir.is_relative_to(root) or analysis_dir == root:
+        return False, 400, "Invalid analysis ID."
+
+    if analysis_id in ACTIVE_ANALYSES:
+        return False, 409, f"Cannot delete analysis '{analysis_id}' while it is actively processing."
+
+    if not analysis_dir.exists() or not analysis_dir.is_dir():
+        return False, 404, f"Analysis '{analysis_id}' was not found."
+
+    manifest_path = _analysis_metadata_file(analysis_dir)
+    if manifest_path.exists():
+        try:
+            manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if manifest_data.get("status") in {"processing", "running", "in_progress"}:
+                return False, 409, f"Cannot delete analysis '{analysis_id}' while it is still running."
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    try:
+        shutil.rmtree(analysis_dir)
+        return True, 200, ""
+    except OSError as exc:
+        return False, 500, f"Failed to delete analysis data: {exc}"
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Route Resilience API")
 
@@ -566,44 +610,77 @@ def create_app() -> FastAPI:
 
     @app.delete("/api/analysis/{analysis_id}")
     async def delete_analysis(analysis_id: str) -> Dict[str, Any]:
-        if not analysis_id or "/" in analysis_id or "\\" in analysis_id or ".." in analysis_id:
-            raise HTTPException(status_code=400, detail="Invalid analysis ID.")
-
         root = _analysis_root().resolve()
-        analysis_dir = (_analysis_root() / analysis_id).resolve()
-        if not analysis_dir.is_relative_to(root):
-            raise HTTPException(status_code=400, detail="Invalid analysis ID.")
-
-        if analysis_id in ACTIVE_ANALYSES:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Cannot delete analysis '{analysis_id}' while it is actively processing.",
-            )
-
-        if not analysis_dir.exists() or not analysis_dir.is_dir():
-            raise HTTPException(status_code=404, detail=f"Analysis '{analysis_id}' was not found.")
-
-        manifest_path = _analysis_metadata_file(analysis_dir)
-        if manifest_path.exists():
-            try:
-                manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
-                if manifest_data.get("status") in {"processing", "running", "in_progress"}:
-                    raise HTTPException(
-                        status_code=409,
-                        detail=f"Cannot delete analysis '{analysis_id}' while it is still running.",
-                    )
-            except (json.JSONDecodeError, OSError):
-                pass
-
-        try:
-            shutil.rmtree(analysis_dir)
-        except OSError as exc:
-            raise HTTPException(status_code=500, detail=f"Failed to delete analysis data: {exc}") from exc
+        success, code, err = _safe_delete_analysis_dir(analysis_id, root)
+        if not success:
+            raise HTTPException(status_code=code, detail=err)
 
         return {
             "status": "deleted",
             "analysis_id": analysis_id,
             "message": f"Analysis '{analysis_id}' and all associated files deleted successfully.",
+        }
+
+    @app.delete("/api/analyses")
+    @app.post("/api/analyses/bulk-delete")
+    async def bulk_delete_analyses(
+        request: Request,
+        delete_all: bool = False,
+        body: Optional[BulkDeleteRequest] = None,
+    ) -> Dict[str, Any]:
+        root = _analysis_root().resolve()
+        target_ids: list[str] = []
+        should_delete_all = delete_all
+
+        if body is not None:
+            target_ids = list(body.analysis_ids)
+            if body.delete_all:
+                should_delete_all = True
+        elif request.headers.get("content-type", "").startswith("application/json"):
+            try:
+                raw_json = await request.json()
+                if isinstance(raw_json, dict):
+                    target_ids = list(raw_json.get("analysis_ids", []))
+                    if raw_json.get("delete_all"):
+                        should_delete_all = True
+            except Exception:
+                pass
+
+        if should_delete_all:
+            if root.exists():
+                target_ids = [item.name for item in root.iterdir() if item.is_dir()]
+            else:
+                target_ids = []
+
+        if not target_ids and not should_delete_all:
+            raise HTTPException(
+                status_code=400,
+                detail="No analysis IDs provided and delete_all is false.",
+            )
+
+        deleted_ids: list[str] = []
+        failed_items: list[dict[str, Any]] = []
+
+        for aid in target_ids:
+            success, code, err = _safe_delete_analysis_dir(aid, root)
+            if success:
+                deleted_ids.append(aid)
+            else:
+                failed_items.append({"analysis_id": aid, "code": code, "error": err})
+
+        if not deleted_ids and failed_items:
+            first_fail = failed_items[0]
+            raise HTTPException(status_code=first_fail["code"], detail=first_fail["error"])
+
+        return {
+            "status": "deleted",
+            "deleted_count": len(deleted_ids),
+            "deleted_ids": deleted_ids,
+            "failed_count": len(failed_items),
+            "failed_items": failed_items,
+            "message": f"Successfully deleted {len(deleted_ids)} analyses."
+            if not failed_items
+            else f"Deleted {len(deleted_ids)} analyses with {len(failed_items)} failure(s).",
         }
 
     @app.get("/api/analysis/{analysis_id}/criticality")

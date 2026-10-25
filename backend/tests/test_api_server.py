@@ -688,3 +688,110 @@ def test_delete_analysis_active_conflict(tmp_path):
     finally:
         api_server.ACTIVE_ANALYSES.discard("active-analysis-1")
 
+
+def test_bulk_delete_selected_analyses(tmp_path):
+    analysis_root = tmp_path / "analysis"
+    for name in ["analysis-a", "analysis-b", "analysis-c"]:
+        d = analysis_root / name
+        d.mkdir(parents=True)
+        (d / "original.png").write_bytes(b"data")
+
+    # Also create an unrelated file/directory in the parent to ensure preservation
+    unrelated_dir = tmp_path / "checkpoints"
+    unrelated_dir.mkdir(parents=True)
+    unrelated_file = unrelated_dir / "best_model.pth"
+    unrelated_file.write_bytes(b"weights")
+
+    os.environ["ROUTE_RESILIENCE_ANALYSIS_DIR"] = str(analysis_root)
+    client = TestClient(api_server.create_app())
+
+    resp = client.request(
+        "DELETE",
+        "/api/analyses",
+        json={"analysis_ids": ["analysis-a", "analysis-c"]},
+    )
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["status"] == "deleted"
+    assert payload["deleted_count"] == 2
+    assert set(payload["deleted_ids"]) == {"analysis-a", "analysis-c"}
+
+    assert not (analysis_root / "analysis-a").exists()
+    assert not (analysis_root / "analysis-c").exists()
+    assert (analysis_root / "analysis-b").exists()
+    assert unrelated_file.exists()
+
+
+def test_bulk_delete_all_analyses(tmp_path):
+    analysis_root = tmp_path / "analysis"
+    for name in ["analysis-1", "analysis-2"]:
+        d = analysis_root / name
+        d.mkdir(parents=True)
+        (d / "original.png").write_bytes(b"data")
+
+    os.environ["ROUTE_RESILIENCE_ANALYSIS_DIR"] = str(analysis_root)
+    client = TestClient(api_server.create_app())
+
+    resp = client.delete("/api/analyses?delete_all=true")
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["status"] == "deleted"
+    assert payload["deleted_count"] == 2
+    assert not (analysis_root / "analysis-1").exists()
+    assert not (analysis_root / "analysis-2").exists()
+
+
+def test_bulk_delete_via_post_endpoint(tmp_path):
+    analysis_root = tmp_path / "analysis"
+    d = analysis_root / "analysis-post"
+    d.mkdir(parents=True)
+    (d / "original.png").write_bytes(b"data")
+
+    os.environ["ROUTE_RESILIENCE_ANALYSIS_DIR"] = str(analysis_root)
+    client = TestClient(api_server.create_app())
+
+    resp = client.post(
+        "/api/analyses/bulk-delete",
+        json={"analysis_ids": ["analysis-post"]},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["deleted_count"] == 1
+    assert not d.exists()
+
+
+def test_bulk_delete_empty_request_rejected(tmp_path):
+    analysis_root = tmp_path / "analysis"
+    analysis_root.mkdir(parents=True, exist_ok=True)
+    os.environ["ROUTE_RESILIENCE_ANALYSIS_DIR"] = str(analysis_root)
+    client = TestClient(api_server.create_app())
+
+    resp = client.delete("/api/analyses")
+    assert resp.status_code == 400
+
+
+def test_bulk_delete_with_active_conflict(tmp_path):
+    analysis_root = tmp_path / "analysis"
+    d1 = analysis_root / "safe-analysis"
+    d1.mkdir(parents=True)
+    (d1 / "original.png").write_bytes(b"data")
+
+    d2 = analysis_root / "active-analysis-batch"
+    d2.mkdir(parents=True)
+    (d2 / "original.png").write_bytes(b"data")
+
+    os.environ["ROUTE_RESILIENCE_ANALYSIS_DIR"] = str(analysis_root)
+    api_server.ACTIVE_ANALYSES.add("active-analysis-batch")
+    try:
+        client = TestClient(api_server.create_app())
+        resp = client.post(
+            "/api/analyses/bulk-delete",
+            json={"analysis_ids": ["safe-analysis", "active-analysis-batch"]},
+        )
+        assert resp.status_code == 200, resp.text
+        payload = resp.json()
+        assert "safe-analysis" in payload["deleted_ids"]
+        assert any(item["analysis_id"] == "active-analysis-batch" for item in payload["failed_items"])
+        assert not d1.exists()
+        assert d2.exists()
+    finally:
+        api_server.ACTIVE_ANALYSES.discard("active-analysis-batch")

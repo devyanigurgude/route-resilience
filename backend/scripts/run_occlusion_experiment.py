@@ -22,8 +22,10 @@ from PIL import Image, ImageDraw, ImageFont
 from sklearn.metrics import f1_score, jaccard_score
 import torch
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
+WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = BACKEND_DIR
+sys.path.insert(0, str(BACKEND_DIR))
 
 from route_resilience.config import Config, GraphConfig
 from route_resilience.graph_extraction import (
@@ -177,8 +179,14 @@ def run_experiment(
     num_tiles: int = 12,
     seed: int = 42,
     device_name: str = "cpu",
+    overwrite: bool = False,
 ) -> Dict[str, Any]:
     output_dir = Path(output_dir)
+    if (output_dir / "results_summary.json").exists() and not overwrite:
+        raise FileExistsError(
+            f"Historical benchmark results already exist in {output_dir}. "
+            "To prevent accidental data loss, provide a different --output_dir or pass --overwrite."
+        )
     visuals_dir = output_dir / "visuals"
     visuals_dir.mkdir(parents=True, exist_ok=True)
 
@@ -257,9 +265,12 @@ def run_experiment(
             occ_iou = float(jaccard_score(gt_mask.ravel(), occ_bin.ravel(), zero_division=1.0))
             occ_dice = float(f1_score(gt_mask.ravel(), occ_bin.ravel(), zero_division=1.0))
 
-            # Run graph extraction and recovery
+            # Run graph extraction and recovery with occluded RGB image for photometric detection
             extraction_result = graph_from_probability_map(
-                occ_prob, threshold=threshold, graph_cfg=graph_cfg
+                occ_prob,
+                threshold=threshold,
+                graph_cfg=graph_cfg,
+                rgb_image=occluded_rgb,
             )
             G_unhealed = extraction_result["graph_before"]
             G_healed = extraction_result["graph_after"]
@@ -423,12 +434,16 @@ def run_experiment(
 
 def main():
     parser = argparse.ArgumentParser(description="Phase 3A Controlled Occlusion Evaluation")
-    parser.add_argument("--dataset_dir", type=Path, default=PROJECT_ROOT / "RouteResilience")
-    parser.add_argument("--checkpoint", type=Path, default=PROJECT_ROOT / "checkpoints" / "best_unet_smp_resnet34_focaldice.pth")
-    parser.add_argument("--output_dir", type=Path, default=PROJECT_ROOT / "outputs" / "occlusion_experiment")
+    default_dataset = WORKSPACE_ROOT / "RouteResilience"
+    if not default_dataset.exists():
+        default_dataset = BACKEND_DIR / "RouteResilience"
+    parser.add_argument("--dataset_dir", type=Path, default=default_dataset)
+    parser.add_argument("--checkpoint", type=Path, default=BACKEND_DIR / "checkpoints" / "best_unet_smp_resnet34_focaldice.pth")
+    parser.add_argument("--output_dir", type=Path, default=WORKSPACE_ROOT / "outputs" / "occlusion_experiment_eval")
     parser.add_argument("--num_tiles", type=int, default=12)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--overwrite", action="store_true", help="Allow overwriting existing outputs in output_dir")
     args = parser.parse_args()
 
     run_experiment(
@@ -438,6 +453,7 @@ def main():
         num_tiles=args.num_tiles,
         seed=args.seed,
         device_name=args.device,
+        overwrite=args.overwrite,
     )
 
 

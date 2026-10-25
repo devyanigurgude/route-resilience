@@ -104,6 +104,11 @@ class GraphConfig:
     max_cloud_occlusion_gap_px: float = 240.0
     cloud_heading_threshold: float = 0.78
     cloud_min_component_len: float = 20.0
+    # Controlled shadow/canopy mask dilation experiment (Priority 2)
+    # Default is False (0 iterations) to preserve exact baseline behavior.
+    enable_mask_dilation: bool = False
+    mask_dilation_kernel_size: int = 3
+    mask_dilation_iterations: int = 1
     cloud_min_coverage: float = 0.55
     cloud_max_sinuosity: float = 1.35
     cloud_min_mutual_heading: float = 0.60    # floor for distance-adaptive mutual heading;

@@ -648,16 +648,32 @@ def confidence_gated_gap_healing(
                 end_pos=positions[b],
                 max_path_length=search_max_len,
             )
-            if (recovered_path is None or len(recovered_path) < 2) and is_occ and occlusion_mask is not None:
-                recovered_path = line
 
+            candidate_paths = []
             if recovered_path is not None and len(recovered_path) >= 2:
-                diffs = np.diff(recovered_path, axis=0)
+                candidate_paths.append(("a_star", recovered_path))
+
+            eligible_for_straight = (
+                is_occ
+                and occlusion_mask is not None
+                and dot_a >= occlusion_heading_threshold
+                and dot_b >= occlusion_heading_threshold
+                and mutual_heading >= 0.60
+            )
+            if eligible_for_straight:
+                candidate_paths.append(("straight", line))
+            elif (recovered_path is None or len(recovered_path) < 2) and is_occ and occlusion_mask is not None:
+                candidate_paths.append(("straight", line))
+
+            evaluated_options = []
+            last_rejection_info = None
+
+            for cand_mode, cand_pts in candidate_paths:
+                diffs = np.diff(cand_pts, axis=0)
                 path_length = float(np.sum(np.sqrt(np.sum(diffs ** 2, axis=1))))
                 sinuosity = path_length / max(1e-3, dist)
                 if sinuosity > max_sinuosity or path_length > search_max_len:
-                    _record_candidate_rejection(
-                        candidate_occlusions_dict, a, b,
+                    last_rejection_info = (
                         f"Path sinuosity ({sinuosity:.2f}) or length ({path_length:.1f} px) exceeded limit",
                         [
                             {"name": "Gap Distance", "passed": True, "detail": f"{dist:.1f} px"},
@@ -666,12 +682,12 @@ def confidence_gated_gap_healing(
                     )
                     continue
 
-                n_pts = len(recovered_path)
+                n_pts = len(cand_pts)
                 p_margin = max(1, n_pts // 5)
                 p_interior = (
-                    recovered_path[p_margin:-p_margin]
+                    cand_pts[p_margin:-p_margin]
                     if n_pts > 2 * p_margin
-                    else recovered_path
+                    else cand_pts
                 )
                 p_rows = np.clip(np.rint(p_interior[:, 0]).astype(int), 0, H - 1)
                 p_cols = np.clip(np.rint(p_interior[:, 1]).astype(int), 0, W - 1)
@@ -692,7 +708,7 @@ def confidence_gated_gap_healing(
 
                 occ_coverage = 0.0
                 if occlusion_mask is not None:
-                    occ_coverage = float(_mask_coverage(occlusion_mask, recovered_path))
+                    occ_coverage = float(_mask_coverage(occlusion_mask, cand_pts))
 
                 # Standard A* recovery: high evidence throughout
                 standard_a_star_ok = (
@@ -730,6 +746,82 @@ def confidence_gated_gap_healing(
                     and sinuosity <= 1.20
                     and occ_coverage >= 0.50
                 )
+
+                if standard_a_star_ok or occlusion_recovery_ok or occlusion_mask_recovery_ok:
+                    evaluated_options.append({
+                        "mode": cand_mode,
+                        "path": cand_pts,
+                        "length": path_length,
+                        "sinuosity": sinuosity,
+                        "evidence": p_evidence,
+                        "supported_fraction": p_supported_fraction,
+                        "contrast": p_contrast,
+                        "occ_coverage": occ_coverage,
+                        "standard_a_star_ok": standard_a_star_ok,
+                        "occlusion_recovery_ok": occlusion_recovery_ok,
+                        "occlusion_mask_recovery_ok": occlusion_mask_recovery_ok,
+                    })
+                else:
+                    reasons = []
+                    checks = []
+                    dist_ok = (dist <= max_occlusion_gap_px if is_occ else dist <= max_gap_px)
+                    checks.append({"name": "Gap Distance", "passed": dist_ok, "detail": f"{dist:.1f} px (limit: {max_occlusion_gap_px if is_occ else max_gap_px:.1f} px)"})
+                    if not dist_ok:
+                        reasons.append(f"Gap distance ({dist:.1f} px) exceeds limit")
+
+                    min_ev = min_occlusion_confidence if is_occ else min_gap_confidence
+                    ev_ok = (p_evidence >= min_ev) or (is_occ and occ_coverage >= 0.50)
+                    checks.append({"name": "Probability Evidence", "passed": ev_ok, "detail": f"{p_evidence:.3f} (threshold: {min_ev:.3f}, occlusion_coverage={occ_coverage:.1%})"})
+                    if not ev_ok:
+                        reasons.append(f"Probability evidence ({p_evidence:.3f}) below threshold ({min_ev:.3f}) without occlusion mask support")
+
+                    if not is_occ:
+                        frac_ok = (p_supported_fraction >= 0.7)
+                        checks.append({"name": "Supported Fraction", "passed": frac_ok, "detail": f"{p_supported_fraction:.1%} (threshold: 70.0%)"})
+                        if not frac_ok:
+                            reasons.append(f"Supported pixel fraction below 70% ({p_supported_fraction:.1%})")
+
+                    sin_limit = 1.25 if is_occ else max_sinuosity
+                    sin_ok = (sinuosity <= sin_limit)
+                    checks.append({"name": "Path Sinuosity Guard", "passed": sin_ok, "detail": f"{sinuosity:.2f} (limit: {sin_limit:.2f})"})
+                    if not sin_ok:
+                        reasons.append(f"Path sinuosity ({sinuosity:.2f}) exceeds limit ({sin_limit:.2f})")
+
+                    if min_flank_contrast is not None:
+                        fc_limit = -0.05 if is_occ else min_flank_contrast
+                        fc_ok = (p_contrast >= fc_limit)
+                        checks.append({"name": "Flank Contrast", "passed": fc_ok, "detail": f"{p_contrast:.3f} (limit: {fc_limit:.3f})"})
+                        if not fc_ok:
+                            reasons.append(f"Flank contrast ({p_contrast:.3f}) below limit ({fc_limit:.3f})")
+
+                    last_rejection_info = (
+                        "; ".join(reasons) if reasons else "Continuity criteria not satisfied",
+                        checks,
+                    )
+
+            if evaluated_options:
+                best_opt = None
+                for opt in evaluated_options:
+                    if opt["standard_a_star_ok"]:
+                        best_opt = opt
+                        break
+                if best_opt is None:
+                    straight_opts = [opt for opt in evaluated_options if opt["mode"] == "straight"]
+                    if straight_opts:
+                        best_opt = straight_opts[0]
+                    else:
+                        best_opt = min(evaluated_options, key=lambda opt: opt["sinuosity"])
+
+                recovered_path = best_opt["path"]
+                path_length = best_opt["length"]
+                sinuosity = best_opt["sinuosity"]
+                p_evidence = best_opt["evidence"]
+                p_supported_fraction = best_opt["supported_fraction"]
+                p_contrast = best_opt["contrast"]
+                occ_coverage = best_opt["occ_coverage"]
+                standard_a_star_ok = best_opt["standard_a_star_ok"]
+                occlusion_recovery_ok = best_opt["occlusion_recovery_ok"]
+                occlusion_mask_recovery_ok = best_opt["occlusion_mask_recovery_ok"]
 
                 if standard_a_star_ok or occlusion_recovery_ok or occlusion_mask_recovery_ok:
                     is_occ_recovered = True

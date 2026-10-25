@@ -428,6 +428,15 @@ export function getAnalysis<T>(analysisId: string, signal?: AbortSignal) {
   );
 }
 
+export type BulkDeleteResponse = {
+  status: string;
+  deleted_count: number;
+  deleted_ids: string[];
+  failed_count?: number;
+  failed_items?: Array<{ analysis_id: string; code?: number; error: string }>;
+  message: string;
+};
+
 export async function deleteAnalysis(
   analysisId: string,
 ): Promise<{ status: string; analysis_id: string; message: string }> {
@@ -437,8 +446,105 @@ export async function deleteAnalysis(
       method: "DELETE",
     },
   );
-  removeAnalysisFromHistory(analysisId);
+  clearAnalysisLocalData(analysisId);
   return result;
+}
+
+export async function deleteAnalyses(analysisIds: string[]): Promise<BulkDeleteResponse> {
+  if (!analysisIds.length) {
+    return {
+      status: "deleted",
+      deleted_count: 0,
+      deleted_ids: [],
+      message: "No analyses selected.",
+    };
+  }
+  const result = await request<BulkDeleteResponse>("/api/analyses/bulk-delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ analysis_ids: analysisIds }),
+  });
+  if (result.deleted_ids?.length) {
+    clearMultipleAnalysesLocalData(result.deleted_ids);
+  }
+  return result;
+}
+
+export async function deleteAllAnalyses(): Promise<BulkDeleteResponse> {
+  const result = await request<BulkDeleteResponse>("/api/analyses?delete_all=true", {
+    method: "DELETE",
+  });
+  clearAllAnalysesLocalData();
+  return result;
+}
+
+export function clearAnalysisLocalData(analysisId: string) {
+  if (typeof window === "undefined" || !analysisId) return;
+  try {
+    removeAnalysisFromHistory(analysisId);
+    window.localStorage.removeItem(scenarioKey(analysisId));
+    window.localStorage.removeItem(pendingFailureKey(analysisId));
+    window.localStorage.removeItem(pendingNodeFailureKey(analysisId));
+    window.localStorage.removeItem(routeResultKey(analysisId));
+    window.localStorage.removeItem(recoveryResultKey(analysisId));
+    if (window.localStorage.getItem(SAVED_ANALYSIS_KEY) === analysisId) {
+      window.localStorage.removeItem(SAVED_ANALYSIS_KEY);
+    }
+  } catch {
+    // Ignore localStorage errors
+  }
+}
+
+export function clearMultipleAnalysesLocalData(analysisIds: string[]) {
+  if (typeof window === "undefined" || !analysisIds.length) return;
+  try {
+    const raw = window.localStorage.getItem(ANALYSES_HISTORY_KEY);
+    if (raw) {
+      const existing: AnalysisItem[] = JSON.parse(raw);
+      const idSet = new Set(analysisIds);
+      const filtered = existing.filter((a) => !idSet.has(a.analysis_id));
+      window.localStorage.setItem(ANALYSES_HISTORY_KEY, JSON.stringify(filtered));
+    }
+    for (const id of analysisIds) {
+      window.localStorage.removeItem(scenarioKey(id));
+      window.localStorage.removeItem(pendingFailureKey(id));
+      window.localStorage.removeItem(pendingNodeFailureKey(id));
+      window.localStorage.removeItem(routeResultKey(id));
+      window.localStorage.removeItem(recoveryResultKey(id));
+      if (window.localStorage.getItem(SAVED_ANALYSIS_KEY) === id) {
+        window.localStorage.removeItem(SAVED_ANALYSIS_KEY);
+      }
+    }
+  } catch {
+    // Ignore localStorage errors
+  }
+}
+
+export function clearAllAnalysesLocalData() {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(ANALYSES_HISTORY_KEY);
+    window.localStorage.removeItem(SAVED_ANALYSIS_KEY);
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const key = window.localStorage.key(i);
+      if (
+        key &&
+        (key.startsWith(SCENARIO_KEY_PREFIX) ||
+          key.startsWith(PENDING_FAILURE_KEY_PREFIX) ||
+          key.startsWith(PENDING_NODE_FAILURE_KEY_PREFIX) ||
+          key.startsWith(ROUTE_RESULT_KEY_PREFIX) ||
+          key.startsWith(RECOVERY_RESULT_KEY_PREFIX))
+      ) {
+        keysToRemove.push(key);
+      }
+    }
+    for (const key of keysToRemove) {
+      window.localStorage.removeItem(key);
+    }
+  } catch {
+    // Ignore localStorage errors
+  }
 }
 
 export function removeAnalysisFromHistory(analysisId: string) {

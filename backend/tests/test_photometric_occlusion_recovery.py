@@ -167,3 +167,98 @@ class TestOcclusionRecoverySafeBridging:
         )
         assert not healed_perp.has_edge("H30", "V60")
 
+    def test_recovers_diagonal_zero_evidence_span_with_straight_continuation(self):
+        """Diagonal ~30-deg road gap beneath verified occlusion recovers with sinuosity <= 1.05."""
+        deg = 30
+        theta = np.radians(deg)
+        dr, dc = float(np.sin(theta)), float(np.cos(theta))
+        y0, x0 = 30.0, 20.0
+        trunk_len = 15
+        gap_px = 22.0
+
+        G = nx.Graph()
+        for i in range(trunk_len + 1):
+            pos = (y0 + i * dr, x0 + i * dc)
+            G.add_node(f"L{i}", pos=pos)
+            if i > 0:
+                prev = (y0 + (i - 1) * dr, x0 + (i - 1) * dc)
+                G.add_edge(f"L{i-1}", f"L{i}", length_px=1.0, pts=np.array([prev, pos]))
+
+        r_start_y = y0 + trunk_len * dr + gap_px * dr
+        r_start_x = x0 + trunk_len * dc + gap_px * dc
+
+        for i in range(trunk_len + 1):
+            pos = (r_start_y + i * dr, r_start_x + i * dc)
+            G.add_node(f"R{i}", pos=pos)
+            if i > 0:
+                prev = (r_start_y + (i - 1) * dr, r_start_x + (i - 1) * dc)
+                G.add_edge(f"R{i-1}", f"R{i}", length_px=1.0, pts=np.array([prev, pos]))
+
+        prob_map = np.zeros((120, 120), dtype=np.float32)
+        occ_mask = np.ones((120, 120), dtype=bool)
+
+        left_tip = f"L{trunk_len}"
+        right_tip = "R0"
+
+        healed = confidence_gated_gap_healing(
+            G,
+            prob_map,
+            max_gap_px=15.0,
+            enable_occlusion_recovery=True,
+            max_occlusion_gap_px=30.0,
+            occlusion_mask=occ_mask,
+        )
+
+        assert healed.has_edge(left_tip, right_tip), "Diagonal gap beneath verified occlusion must be bridged"
+        edge = healed[left_tip][right_tip]
+        assert edge["healed"] is True
+        assert edge["occlusion_recovered"] is True
+        assert edge["recovery_type"] == "occlusion_continuity"
+        assert edge["evidence"]["sinuosity"] <= 1.05, f"Expected sinuosity <= 1.05, got {edge['evidence']['sinuosity']}"
+        assert edge["sinuosity"] <= 1.05
+
+    def test_rejects_diagonal_zero_evidence_span_without_occlusion_mask(self):
+        """Diagonal ~30-deg road gap with zero probability and no occlusion mask remains unhealed."""
+        deg = 30
+        theta = np.radians(deg)
+        dr, dc = float(np.sin(theta)), float(np.cos(theta))
+        y0, x0 = 30.0, 20.0
+        trunk_len = 15
+        gap_px = 22.0
+
+        G = nx.Graph()
+        for i in range(trunk_len + 1):
+            pos = (y0 + i * dr, x0 + i * dc)
+            G.add_node(f"L{i}", pos=pos)
+            if i > 0:
+                prev = (y0 + (i - 1) * dr, x0 + (i - 1) * dc)
+                G.add_edge(f"L{i-1}", f"L{i}", length_px=1.0, pts=np.array([prev, pos]))
+
+        r_start_y = y0 + trunk_len * dr + gap_px * dr
+        r_start_x = x0 + trunk_len * dc + gap_px * dc
+
+        for i in range(trunk_len + 1):
+            pos = (r_start_y + i * dr, r_start_x + i * dc)
+            G.add_node(f"R{i}", pos=pos)
+            if i > 0:
+                prev = (r_start_y + (i - 1) * dr, r_start_x + (i - 1) * dc)
+                G.add_edge(f"R{i-1}", f"R{i}", length_px=1.0, pts=np.array([prev, pos]))
+
+        prob_map = np.zeros((120, 120), dtype=np.float32)
+        occ_mask = np.zeros((120, 120), dtype=bool)
+
+        left_tip = f"L{trunk_len}"
+        right_tip = "R0"
+
+        healed = confidence_gated_gap_healing(
+            G,
+            prob_map,
+            max_gap_px=15.0,
+            enable_occlusion_recovery=True,
+            max_occlusion_gap_px=30.0,
+            occlusion_mask=occ_mask,
+        )
+
+        assert not healed.has_edge(left_tip, right_tip), "Unsupported zero-evidence diagonal gap must not be healed"
+        assert nx.number_connected_components(healed) == 2
+

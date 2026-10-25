@@ -3,12 +3,14 @@ import {
   AlertCircle,
   ArrowRight,
   CheckCircle2,
+  CheckSquare,
   Clock,
   ExternalLink,
   FileImage,
   FolderOpen,
   Layers,
   LoaderCircle,
+  MoreVertical,
   Network,
   Plus,
   RefreshCw,
@@ -21,6 +23,8 @@ import { ChangeEvent, DragEvent, useEffect, useRef, useState } from "react";
 import {
   API_BASE,
   deleteAnalysis,
+  deleteAnalyses,
+  deleteAllAnalyses,
   getAnalyses,
   saveAnalysisToHistory,
   SAVED_ANALYSIS_KEY,
@@ -36,6 +40,14 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 
 type AnalysisPhase = "idle" | "processing" | "success" | "error";
@@ -160,14 +172,38 @@ function ExplorePage() {
   const [activeTab, setActiveTab] = useState<"new" | "history">("new");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const [itemToDelete, setItemToDelete] = useState<AnalysisItem | null>(null);
+  // Multi-selection state
+  const [isSelectionMode, setIsSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+
+  // Delete confirmation state
+  const [deleteConfirmation, setDeleteConfirmation] = useState<{
+    mode: "single" | "selected" | "all";
+    item?: AnalysisItem;
+    count?: number;
+    ids?: string[];
+  } | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [actionFeedback, setActionFeedback] = useState<{
     type: "success" | "error";
     message: string;
   } | null>(null);
 
-  const promptDelete = (e: React.MouseEvent, item: AnalysisItem) => {
+  const toggleSelectItem = (id: string) => {
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+    );
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedIds.length === history.length) {
+      setSelectedIds([]);
+    } else {
+      setSelectedIds(history.map((it) => it.analysis_id));
+    }
+  };
+
+  const promptDeleteSingle = (e: React.MouseEvent, item: AnalysisItem) => {
     e.stopPropagation();
     if (item.status === "processing" || item.status === "running") {
       setActionFeedback({
@@ -176,35 +212,103 @@ function ExplorePage() {
       });
       return;
     }
-    setItemToDelete(item);
+    setDeleteConfirmation({ mode: "single", item });
   };
 
-  const confirmDelete = async () => {
-    if (!itemToDelete) return;
+  const promptDeleteSelected = () => {
+    if (selectedIds.length === 0) return;
+    const runningSelected = history.filter(
+      (it) => selectedIds.includes(it.analysis_id) && (it.status === "processing" || it.status === "running")
+    );
+    if (runningSelected.length > 0) {
+      setActionFeedback({
+        type: "error",
+        message: `Cannot delete active analyses (${runningSelected.length} running). Please wait for completion.`,
+      });
+      return;
+    }
+    setDeleteConfirmation({
+      mode: "selected",
+      count: selectedIds.length,
+      ids: [...selectedIds],
+    });
+  };
+
+  const promptDeleteAll = () => {
+    if (history.length === 0) return;
+    const runningItems = history.filter(
+      (it) => it.status === "processing" || it.status === "running"
+    );
+    if (runningItems.length > 0) {
+      setActionFeedback({
+        type: "error",
+        message: `Cannot delete all analyses while ${runningItems.length} analysis is still running. Please wait for completion.`,
+      });
+      return;
+    }
+    setDeleteConfirmation({
+      mode: "all",
+      count: history.length,
+    });
+  };
+
+  const confirmExecuteDelete = async () => {
+    if (!deleteConfirmation) return;
     setIsDeleting(true);
     setActionFeedback(null);
     try {
-      await deleteAnalysis(itemToDelete.analysis_id);
-      setHistory((prev) => prev.filter((it) => it.analysis_id !== itemToDelete.analysis_id));
-      if (
-        typeof window !== "undefined" &&
-        window.localStorage.getItem(SAVED_ANALYSIS_KEY) === itemToDelete.analysis_id
-      ) {
-        window.localStorage.removeItem(SAVED_ANALYSIS_KEY);
-        if (analysis.result?.analysis_id === itemToDelete.analysis_id) {
+      if (deleteConfirmation.mode === "single" && deleteConfirmation.item) {
+        const item = deleteConfirmation.item;
+        await deleteAnalysis(item.analysis_id);
+        setHistory((prev) => prev.filter((it) => it.analysis_id !== item.analysis_id));
+        setSelectedIds((prev) => prev.filter((id) => id !== item.analysis_id));
+        if (
+          typeof window !== "undefined" &&
+          window.localStorage.getItem(SAVED_ANALYSIS_KEY) === item.analysis_id
+        ) {
+          window.localStorage.removeItem(SAVED_ANALYSIS_KEY);
+          if (analysis.result?.analysis_id === item.analysis_id) {
+            setAnalysis({ phase: "idle" });
+          }
+        }
+        const label = item.input_image_name ?? `#${item.analysis_id.slice(0, 8)}`;
+        setActionFeedback({
+          type: "success",
+          message: `Analysis ${label} was deleted successfully.`,
+        });
+      } else if (deleteConfirmation.mode === "selected" && deleteConfirmation.ids) {
+        const idsToDelete = deleteConfirmation.ids;
+        const resp = await deleteAnalyses(idsToDelete);
+        const deletedSet = new Set(resp.deleted_ids.length ? resp.deleted_ids : idsToDelete);
+        setHistory((prev) => prev.filter((it) => !deletedSet.has(it.analysis_id)));
+        setSelectedIds([]);
+        setIsSelectionMode(false);
+        if (
+          analysis.result?.analysis_id &&
+          deletedSet.has(analysis.result.analysis_id)
+        ) {
           setAnalysis({ phase: "idle" });
         }
+        setActionFeedback({
+          type: "success",
+          message: `Successfully deleted ${deletedSet.size} selected analyses.`,
+        });
+      } else if (deleteConfirmation.mode === "all") {
+        await deleteAllAnalyses();
+        setHistory([]);
+        setSelectedIds([]);
+        setIsSelectionMode(false);
+        setAnalysis({ phase: "idle" });
+        setActionFeedback({
+          type: "success",
+          message: "All analyses were deleted successfully from storage.",
+        });
       }
-      const label = itemToDelete.input_image_name ?? `#${itemToDelete.analysis_id.slice(0, 8)}`;
-      setActionFeedback({
-        type: "success",
-        message: `Analysis ${label} was deleted successfully.`,
-      });
-      setItemToDelete(null);
+      setDeleteConfirmation(null);
     } catch (err) {
       setActionFeedback({
         type: "error",
-        message: err instanceof Error ? err.message : "Failed to delete analysis.",
+        message: err instanceof Error ? err.message : "Failed to delete analysis data.",
       });
     } finally {
       setIsDeleting(false);
@@ -690,7 +794,7 @@ function ExplorePage() {
       {/* History Cards Tab */}
       {activeTab === "history" && (
         <section aria-label="Analysis History">
-          <div className="flex items-center justify-between mb-5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-5">
             <div>
               <h2 className="text-lg font-bold text-foreground">Analysis History</h2>
               <p className="text-xs text-muted-foreground">
@@ -698,14 +802,105 @@ function ExplorePage() {
                 workspace.
               </p>
             </div>
-            <button
-              type="button"
-              onClick={() => void loadHistory()}
-              className="inline-flex items-center gap-1.5 text-xs font-medium text-foreground hover:text-teal-600 dark:hover:text-teal-400 bg-card border border-border rounded-lg px-3 py-1.5 shadow-2xs transition"
-            >
-              <RefreshCw size={13} />
-              <span>Refresh</span>
-            </button>
+
+            <div className="flex items-center gap-2 flex-wrap">
+              {isSelectionMode ? (
+                <>
+                  <span className="text-xs text-muted-foreground font-medium px-2 py-1 bg-muted rounded-md border border-border">
+                    {selectedIds.length} of {history.length} selected
+                  </span>
+                  <button
+                    type="button"
+                    onClick={toggleSelectAll}
+                    disabled={history.length === 0}
+                    className="inline-flex items-center gap-1.5 text-xs font-medium text-foreground hover:text-teal-600 dark:hover:text-teal-400 bg-card border border-border rounded-lg px-3 py-1.5 shadow-2xs transition disabled:opacity-50 cursor-pointer"
+                  >
+                    <span>{selectedIds.length === history.length ? "Deselect All" : "Select All"}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={promptDeleteSelected}
+                    disabled={selectedIds.length === 0 || isDeleting}
+                    className="inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 disabled:opacity-50 disabled:hover:bg-rose-600 rounded-lg px-3 py-1.5 shadow-2xs transition cursor-pointer"
+                  >
+                    <Trash2 size={13} />
+                    <span>Delete Selected ({selectedIds.length})</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsSelectionMode(false);
+                      setSelectedIds([]);
+                    }}
+                    className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-card border border-border rounded-lg px-3 py-1.5 shadow-2xs transition cursor-pointer"
+                  >
+                    <span>Cancel</span>
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setIsSelectionMode(true)}
+                    disabled={history.length === 0}
+                    className="inline-flex items-center gap-1.5 text-xs font-medium text-foreground hover:text-teal-600 dark:hover:text-teal-400 bg-card border border-border rounded-lg px-3 py-1.5 shadow-2xs transition disabled:opacity-50 cursor-pointer"
+                  >
+                    <CheckSquare size={13} />
+                    <span>Select Images</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void loadHistory()}
+                    className="inline-flex items-center gap-1.5 text-xs font-medium text-foreground hover:text-teal-600 dark:hover:text-teal-400 bg-card border border-border rounded-lg px-3 py-1.5 shadow-2xs transition cursor-pointer"
+                  >
+                    <RefreshCw size={13} />
+                    <span>Refresh</span>
+                  </button>
+                </>
+              )}
+
+              {/* Three-dot menu */}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    type="button"
+                    aria-label="Analysis history options"
+                    title="More options"
+                    className="inline-flex items-center justify-center text-xs font-medium text-foreground hover:text-teal-600 dark:hover:text-teal-400 bg-card border border-border rounded-lg p-1.5 shadow-2xs transition cursor-pointer"
+                  >
+                    <MoreVertical size={15} />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-48 bg-card border-border text-foreground">
+                  {!isSelectionMode && (
+                    <DropdownMenuItem
+                      onClick={() => setIsSelectionMode(true)}
+                      disabled={history.length === 0}
+                      className="cursor-pointer gap-2 text-xs"
+                    >
+                      <CheckSquare size={14} />
+                      <span>Select Images</span>
+                    </DropdownMenuItem>
+                  )}
+                  <DropdownMenuItem
+                    onClick={() => void loadHistory()}
+                    className="cursor-pointer gap-2 text-xs"
+                  >
+                    <RefreshCw size={14} />
+                    <span>Refresh List</span>
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator className="bg-border" />
+                  <DropdownMenuItem
+                    onClick={promptDeleteAll}
+                    disabled={history.length === 0 || isDeleting}
+                    className="cursor-pointer gap-2 text-xs text-rose-500 focus:text-rose-500 focus:bg-rose-500/10 font-medium"
+                  >
+                    <Trash2 size={14} />
+                    <span>Delete All Analysis</span>
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
           </div>
 
           {actionFeedback && (
@@ -766,12 +961,24 @@ function ExplorePage() {
                 const nodeCount = item.summary?.after_healing?.n_nodes ?? "—";
                 const edgeCount = item.summary?.after_healing?.n_edges ?? "—";
                 const compCount = item.summary?.after_healing?.n_components ?? "—";
+                const isSelected = selectedIds.includes(item.analysis_id);
 
                 return (
                   <div
                     key={item.analysis_id}
-                    onClick={() => reopenAnalysis(item)}
-                    className="group rounded-xl border border-border bg-card p-4 shadow-xs hover:border-teal-500/60 hover:shadow-sm transition cursor-pointer flex flex-col justify-between"
+                    onClick={() => {
+                      if (isSelectionMode) {
+                        toggleSelectItem(item.analysis_id);
+                      } else {
+                        reopenAnalysis(item);
+                      }
+                    }}
+                    className={cn(
+                      "group rounded-xl border bg-card p-4 shadow-xs transition cursor-pointer flex flex-col justify-between relative",
+                      isSelected
+                        ? "border-teal-500 ring-2 ring-teal-500/30 bg-teal-500/5 shadow-sm"
+                        : "border-border hover:border-teal-500/60 hover:shadow-sm",
+                    )}
                   >
                     <div>
                       {/* Image Thumbnail */}
@@ -789,22 +996,44 @@ function ExplorePage() {
                             <Layers size={24} />
                           </div>
                         )}
-                        <span className="absolute top-2 left-2 rounded-md bg-slate-900/85 backdrop-blur-xs px-2 py-0.5 text-[0.62rem] font-mono font-medium text-white border border-slate-700/50">
-                          #{item.analysis_id.slice(0, 8)}
-                        </span>
+                        {isSelectionMode ? (
+                          <div
+                            className="absolute top-2 left-2 z-20 flex items-center gap-1.5 rounded-md bg-slate-900/90 backdrop-blur-xs px-2 py-1 border border-slate-700/60 shadow-md cursor-pointer"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              toggleSelectItem(item.analysis_id);
+                            }}
+                          >
+                            <Checkbox
+                              checked={isSelected}
+                              onCheckedChange={() => toggleSelectItem(item.analysis_id)}
+                              aria-label={`Select analysis ${item.input_image_name ?? item.analysis_id.slice(0, 8)}`}
+                              className="border-white/70 data-[state=checked]:bg-teal-500 data-[state=checked]:border-teal-500 cursor-pointer"
+                            />
+                            <span className="font-mono text-[0.62rem] text-slate-200">
+                              #{item.analysis_id.slice(0, 8)}
+                            </span>
+                          </div>
+                        ) : (
+                          <span className="absolute top-2 left-2 rounded-md bg-slate-900/85 backdrop-blur-xs px-2 py-0.5 text-[0.62rem] font-mono font-medium text-white border border-slate-700/50">
+                            #{item.analysis_id.slice(0, 8)}
+                          </span>
+                        )}
                         <div className="absolute top-2 right-2 flex items-center gap-1.5 z-10">
                           <span className="rounded-md bg-teal-600/90 px-2 py-0.5 text-[0.62rem] font-semibold text-white">
                             Completed
                           </span>
-                          <button
-                            type="button"
-                            aria-label={`Delete analysis ${item.input_image_name ?? item.analysis_id.slice(0, 8)}`}
-                            title="Delete Analysis"
-                            onClick={(e) => promptDelete(e, item)}
-                            className="rounded-md bg-slate-900/85 hover:bg-rose-600 text-slate-300 hover:text-white p-1 backdrop-blur-xs transition border border-slate-700/50 shadow-xs cursor-pointer"
-                          >
-                            <Trash2 size={12} />
-                          </button>
+                          {!isSelectionMode && (
+                            <button
+                              type="button"
+                              aria-label={`Delete analysis ${item.input_image_name ?? item.analysis_id.slice(0, 8)}`}
+                              title="Delete Analysis"
+                              onClick={(e) => promptDeleteSingle(e, item)}
+                              className="rounded-md bg-slate-900/85 hover:bg-rose-600 text-slate-300 hover:text-white p-1 backdrop-blur-xs transition border border-slate-700/50 shadow-xs cursor-pointer"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          )}
                         </div>
                       </div>
 
@@ -842,7 +1071,7 @@ function ExplorePage() {
 
                     {/* Card Footer CTA */}
                     <div className="mt-4 pt-3 border-t border-border flex items-center justify-between text-xs font-semibold text-teal-600 dark:text-teal-400">
-                      <span>Open Network Workspace</span>
+                      <span>{isSelectionMode ? (isSelected ? "Selected" : "Click to select") : "Open Network Workspace"}</span>
                       <ArrowRight
                         size={14}
                         className="group-hover:translate-x-1 transition-transform"
@@ -858,25 +1087,54 @@ function ExplorePage() {
 
       {/* Delete Confirmation Alert Dialog */}
       <AlertDialog
-        open={itemToDelete !== null}
-        onOpenChange={(open) => !open && !isDeleting && setItemToDelete(null)}
+        open={deleteConfirmation !== null}
+        onOpenChange={(open) => !open && !isDeleting && setDeleteConfirmation(null)}
       >
         <AlertDialogContent className="bg-card border-border text-foreground">
           <AlertDialogHeader>
-            <AlertDialogTitle className="text-foreground">Delete Analysis?</AlertDialogTitle>
+            <AlertDialogTitle className="text-foreground">
+              {deleteConfirmation?.mode === "single"
+                ? "Delete Analysis?"
+                : deleteConfirmation?.mode === "selected"
+                  ? `Delete ${deleteConfirmation?.count} Selected ${deleteConfirmation?.count === 1 ? "Analysis" : "Analyses"}?`
+                  : "Delete All Analyses?"}
+            </AlertDialogTitle>
             <AlertDialogDescription className="text-muted-foreground">
-              Are you sure you want to permanently delete analysis{" "}
-              <strong className="text-foreground">
-                {itemToDelete?.input_image_name ?? `#${itemToDelete?.analysis_id.slice(0, 8)}`}
-              </strong>{" "}
-              <span className="font-mono text-xs opacity-80">({itemToDelete?.analysis_id})</span>?
-              This will remove its extracted network, visual artifacts, and disruption results from storage.
+              {deleteConfirmation?.mode === "single" && (
+                <>
+                  Are you sure you want to permanently delete analysis{" "}
+                  <strong className="text-foreground">
+                    {deleteConfirmation.item?.input_image_name ?? `#${deleteConfirmation.item?.analysis_id.slice(0, 8)}`}
+                  </strong>{" "}
+                  <span className="font-mono text-xs opacity-80">({deleteConfirmation.item?.analysis_id})</span>?
+                  This will remove its extracted network, visual artifacts, and disruption results from storage.
+                </>
+              )}
+              {deleteConfirmation?.mode === "selected" && (
+                <>
+                  Are you sure you want to permanently delete{" "}
+                  <strong className="text-foreground">
+                    {deleteConfirmation.count} selected {deleteConfirmation.count === 1 ? "analysis" : "analyses"}
+                  </strong>?
+                  This will remove all corresponding road networks, visual artifacts, and disruption evaluations from storage.
+                </>
+              )}
+              {deleteConfirmation?.mode === "all" && (
+                <>
+                  Are you sure you want to permanently delete{" "}
+                  <strong className="text-foreground">ALL {deleteConfirmation.count} analyses</strong>?
+                  This will remove all extracted road graphs, visual imagery, and disruption results from storage.
+                  <span className="block mt-2 font-semibold text-rose-500">
+                    This action is permanent and cannot be undone.
+                  </span>
+                </>
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel
               disabled={isDeleting}
-              className="bg-muted text-foreground border-border hover:bg-muted/80"
+              className="bg-muted text-foreground border-border hover:bg-muted/80 cursor-pointer"
             >
               Cancel
             </AlertDialogCancel>
@@ -884,11 +1142,19 @@ function ExplorePage() {
               disabled={isDeleting}
               onClick={(e) => {
                 e.preventDefault();
-                void confirmDelete();
+                void confirmExecuteDelete();
               }}
-              className="bg-rose-600 text-white hover:bg-rose-700 font-semibold"
+              className="bg-rose-600 text-white hover:bg-rose-700 font-semibold cursor-pointer"
             >
-              {isDeleting ? "Deleting..." : "Delete Analysis"}
+              {isDeleting
+                ? deleteConfirmation?.mode === "all"
+                  ? "Deleting All..."
+                  : "Deleting..."
+                : deleteConfirmation?.mode === "single"
+                  ? "Delete Analysis"
+                  : deleteConfirmation?.mode === "selected"
+                    ? `Delete ${deleteConfirmation?.count} Selected`
+                    : "Delete All Analysis"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

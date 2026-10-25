@@ -125,3 +125,108 @@ def test_topology_matching_reports_component_reduction():
     assert res["unhealed_component_count"] == 2
     assert res["healed_component_count"] == 1
     assert res["component_reduction"] == 1
+
+
+def test_graph_from_probability_map_with_occluded_rgb_exercises_recovery():
+    """Verify passing occluded RGB image enables photometric detection and gap recovery."""
+    from route_resilience.config import GraphConfig
+    from route_resilience.real_graph_pipeline import (
+        attach_width,
+        clean_road_mask,
+        cloud_occlusion_mask,
+        mask_to_skeleton,
+        photometric_occlusion_mask,
+        skeleton_to_graph,
+    )
+    from route_resilience.graph_extraction import confidence_gated_gap_healing
+
+    H, W = 100, 100
+    prob_map = np.full((H, W), 0.02, dtype=np.float32)
+    # Horizontal road: row 50, left branch cols 10..35, right branch cols 55..80 (gap 20 px)
+    prob_map[50, 10:36] = 0.90
+    prob_map[50, 55:81] = 0.90
+
+    # Build an RGB image with dark shadow [30, 30, 30] over the gap corridor
+    rgb_image = np.full((H, W, 3), [100, 95, 85], dtype=np.uint8)
+    rgb_image[45:55, 30:60] = [30, 30, 30]
+
+    assert rgb_image.shape == (H, W, 3)
+    assert rgb_image.dtype == np.uint8
+
+    graph_cfg = GraphConfig(
+        max_gap_px=15.0,
+        min_gap_confidence=0.15,
+        enable_occlusion_recovery=True,
+        max_occlusion_gap_px=30.0,
+        min_occlusion_confidence=0.05,
+        occlusion_heading_threshold=0.75,
+    )
+
+    bin_mask = clean_road_mask(prob_map >= 0.50, min_component_pixels=3)
+    skel = mask_to_skeleton(bin_mask)
+    G_before = skeleton_to_graph(skel, prob_map=prob_map, min_edge_length_px=graph_cfg.min_edge_length_px)
+    G_before = attach_width(G_before, bin_mask)
+
+    p_mask = photometric_occlusion_mask(rgb_image)
+    c_mask = cloud_occlusion_mask(rgb_image)
+
+    # 1. Without occlusion mask (old defect in run_occlusion_experiment): 20px zero-evidence gap is rejected
+    G_without_mask = confidence_gated_gap_healing(
+        G_before.copy(),
+        prob_map,
+        max_gap_px=graph_cfg.max_gap_px,
+        min_gap_confidence=graph_cfg.min_gap_confidence,
+        enable_occlusion_recovery=True,
+        max_occlusion_gap_px=30.0,
+        min_occlusion_confidence=0.05,
+        occlusion_heading_threshold=0.75,
+        occlusion_mask=None,
+        cloud_mask=None,
+    )
+    unhealed_edges = [d for _, _, d in G_without_mask.edges(data=True) if d.get("healed")]
+    assert len(unhealed_edges) == 0, "Without photometric occlusion mask, gap must not be healed"
+
+    # 2. With occlusion mask (fixed run_occlusion_experiment path): photometric mask enables occlusion continuity
+    G_with_mask = confidence_gated_gap_healing(
+        G_before.copy(),
+        prob_map,
+        max_gap_px=graph_cfg.max_gap_px,
+        min_gap_confidence=graph_cfg.min_gap_confidence,
+        enable_occlusion_recovery=True,
+        max_occlusion_gap_px=30.0,
+        min_occlusion_confidence=0.05,
+        occlusion_heading_threshold=0.75,
+        occlusion_mask=p_mask,
+        cloud_mask=c_mask,
+    )
+    healed_edges = [d for _, _, d in G_with_mask.edges(data=True) if d.get("healed")]
+    assert len(healed_edges) == 1, "With photometric occlusion mask, gap must be recovered"
+    assert healed_edges[0]["occlusion_recovered"] is True
+    assert healed_edges[0]["recovery_type"] == "occlusion_continuity"
+
+
+def test_phase2_benchmark_safe_output_dir_resolution(tmp_path):
+    """Verify run_phase2_benchmark output directory handling prevents historical overwrite."""
+    import sys
+    from pathlib import Path
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import run_phase2_benchmark
+
+    dummy_dir = tmp_path / "test_benchmark_dir"
+    dummy_dir.mkdir(parents=True)
+    summary_file = dummy_dir / "benchmark_summary.json"
+    summary_file.write_text("{\"historical\": true}", encoding="utf-8")
+
+    # Calling run_benchmark targeting an existing summary file with overwrite=False must raise FileExistsError
+    with pytest.raises(FileExistsError, match="Historical benchmark results already exist"):
+        run_phase2_benchmark.run_benchmark(
+            dataset_dir=Path("dummy"),
+            split_csv=Path("dummy.csv"),
+            unet_checkpoint=Path("dummy.pth"),
+            segformer_checkpoint=None,
+            sample_size=1,
+            output_dir=dummy_dir,
+            overwrite=False,
+        )
